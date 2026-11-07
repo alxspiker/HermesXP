@@ -1,0 +1,10 @@
+{
+  "name": "hermes-xp-msn-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Escargot MSN bot to local Hermes gateway bridge",
+  "main": "bridge.js",
+  "scripts": {"start": "node bridge.js"},
+  "license": "MIT",
+  "engines": {"node": ">=18"}
+}

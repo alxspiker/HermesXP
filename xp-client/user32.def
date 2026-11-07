@@ -1,0 +1,15 @@
+LIBRARY USER32.dll
+EXPORTS
+ _RegisterClassA@4=RegisterClassA
+ _CreateWindowExA@48=CreateWindowExA
+ _ShowWindow@8=ShowWindow
+ _UpdateWindow@4=UpdateWindow
+ _DefWindowProcA@16=DefWindowProcA
+ _GetMessageA@16=GetMessageA
+ _TranslateMessage@4=TranslateMessage
+ _DispatchMessageA@4=DispatchMessageA
+ _PostQuitMessage@4=PostQuitMessage
+ _DestroyWindow@4=DestroyWindow
+ _MessageBoxA@16=MessageBoxA
+ _GetWindowTextA@12=GetWindowTextA
+ _SetWindowTextA@8=SetWindowTextA

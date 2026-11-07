@@ -1,0 +1,5 @@
+LIBRARY KERNEL32.dll
+EXPORTS
+ _GetModuleHandleA@4=GetModuleHandleA
+ _ExitProcess@4=ExitProcess
+ _GetComputerNameA@8=GetComputerNameA

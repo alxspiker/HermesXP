@@ -872,8 +872,14 @@ void WINAPI WinMainCRTStartup(void){
  /* Background HTTP listener so Hermes can fetch the latest screenshot:
     GET http://<xp-ip>:18768/screenshot.bmp (fresh capture on each GET). */
  CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
- /* Force background listener-only mode (skips GUI for SSH/non-desktop launches to ensure listener stays alive) */
- for(;;) Sleep(60000); /* keep screenshot listener alive */
- /* GUI code disabled for this deployment: window_proc, CreateWindow, message loop */
- ExitProcess(0);
+ /* Start the interactive XP GUI while the screenshot listener runs in background. */
+ c.style=0; c.lpfnWndProc=window_proc; c.cbClsExtra=0; c.cbWndExtra=0;
+ c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
+ c.lpszMenuName=NULL; c.lpszClassName="HermesXPMainWindow";
+ if(!RegisterClassA(&c))ExitProcess(2);
+ h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,300,NULL,NULL,g_instance,NULL);
+ if(!h)ExitProcess(1);
+ ShowWindow(h,5);UpdateWindow(h);
+ while(GetMessageA(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageA(&msg);}
+ ExitProcess((UINT)msg.wParam);
 }

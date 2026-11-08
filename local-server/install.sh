@@ -26,7 +26,8 @@
 #   sudo apt-get install -y stunnel4
 #   echo 'net.ipv4.ip_unprivileged_port_start=0' | sudo tee /etc/sysctl.d/99-hermesxp.conf
 #   sudo sysctl -p /etc/sysctl.d/99-hermesxp.conf
-#   sudo ufw allow from 192.168.1.0/24 to any port 18767 proto tcp   # XP package download
+#   Configure the firewall separately; the optional helper only opens 443,
+#   1863 and 1864 for a single explicit XP address.
 # Without those, the installer still finishes the server + bridge, but prints
 # a clear warning and skips the :443 TLS listener.
 #
@@ -152,6 +153,13 @@ fi
 
 systemctl --user enable --now hermes-msn-bridge.service
 log "hermes-msn-bridge service started"
+
+# --- Optional UFW setup (never changes a firewall without confirmation) ---
+if [ -t 0 ]; then
+    python3 "$SCRIPT_DIR/setup-firewall.py" || warn "UFW setup incomplete; check firewall manually"
+else
+    log "Non-interactive install: firewall unchanged; run python3 $SCRIPT_DIR/setup-firewall.py to configure UFW"
+fi
 
 # --- 8. XP install package (zip) + its LAN download host ---
 # The package (exe + connection config + CA + Switcher DLL + INIs + README)

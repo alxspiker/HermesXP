@@ -1,0 +1,41 @@
+HermesXP — MSN Messenger on Windows XP, talking to your Hermes agent
+=====================================================================
+
+This zip has everything needed to get Messenger working on an XP machine.
+No internet on the XP is required: the server runs on the Hermes host
+(the machine at __LAN_IP__), and this zip came from it.
+
+WHAT'S INSIDE
+  HermesXP.exe                 Companion app: tests the connection, and its
+                               "Install for MSN" button places the files
+                               below and launches Messenger.
+  hermesxp.ini                 Connection settings (server __LAN_IP__,
+                               owner __OWNER_EMAIL__). Edit if the server
+                               moves to another address.
+  ca.pem                       The local certificate authority. The Install
+                               button puts it in Trusted Root so Messenger
+                               trusts the local server's HTTPS login.
+  escargot.dll                 Escargot's Switcher: makes Messenger talk
+                               to the local server instead of Microsoft.
+  msnmsgr.exe-escargot.ini    Switcher settings for Messenger.
+  wlcomm.exe-escargot.ini     Switcher settings for its login helper.
+
+INSTALL (about 5 minutes)
+  1. Unzip this folder anywhere on the XP (e.g. C:\HermesXP).
+  2. Run HermesXP.exe and click "Install for MSN". It copies the DLL and
+     settings next to Messenger, installs the CA, and launches Messenger.
+  3. ONE MANUAL STEP (no tool can do it safely yet): import escargot.dll
+     into BOTH C:\Program Files\Windows Live\Messenger\msnmsgr.exe and
+     wlcomm.exe with a PE editor (Stud_PE is the one upstream recommends:
+     open the exe, Imports, add escargot.dll, save). Back the exes up first.
+  4. Sign in to Messenger as __OWNER_EMAIL__ with the password printed
+     when the server was set up. Add the bot (hermes-bot@hermes.local) to
+     your contacts and send it a message — Hermes answers.
+
+TROUBLESHOOTING
+  - "Connection failed" on Test: check the server IP in hermesxp.ini, and
+    that the Hermes host's firewall allows the XP (ports 1863, 443, 18765).
+  - Sign-in fails on TLS: the CA may not have installed — run the Install
+    button again as an administrator, or install ca.pem by hand into
+    Trusted Root Certification Authorities.
+  - The zip can also be carried on a USB drive; it contains no passwords.

@@ -1,0 +1,15 @@
+[Unit]
+Description=Serve the HermesXP install package (zip) on the LAN
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.hermes/msn-server/xp-package
+ExecStartPre=/bin/mkdir -p %h/.hermes/msn-server/xp-package
+ExecStart=/usr/bin/python3 -m http.server 18767 --bind 0.0.0.0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

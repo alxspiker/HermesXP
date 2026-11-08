@@ -11,17 +11,22 @@
 #      script/dbcreate.py fails on modern SQLAlchemy).
 #   5. Creates the two local accounts (owner + bot) and writes their
 #      credentials into ~/.hermes/.env (gateway) and ~/.hermes/msn-bridge.env
-#      (bridge service). The owner password is printed ONCE — give it to Alx
-#      to type into WLM on the XP; it is never written to a file.
+#      (bridge service). The owner password is printed ONCE — give it to the
+#      person who will type it into WLM on the XP; it is never written to a file.
+#      No personal details are hardcoded: the owner defaults to
+#      user@hermes.local, the LAN IP is auto-detected (override with LAN_IP).
 #   6. Installs + starts systemd user services for the server and the bridge.
 #   7. Generates a local CA + server cert and installs the stunnel TLS
 #      terminator on :443 (XP HTTPS sign-in). Needs stunnel + the
 #      ip_unprivileged_port_start sysctl (see SYSTEM REQUIREMENTS below).
+#   8. Writes the pre-filled Switcher INI files (with this host's LAN IP)
+#      to ~/.hermes/msn-server/switcher/ for deployment to the XP.
 #
 # SYSTEM REQUIREMENTS (one-time, run as alxtheprogrammer with sudo):
 #   sudo apt-get install -y stunnel4
 #   echo 'net.ipv4.ip_unprivileged_port_start=0' | sudo tee /etc/sysctl.d/99-hermesxp.conf
 #   sudo sysctl -p /etc/sysctl.d/99-hermesxp.conf
+#   sudo ufw allow from 192.168.1.0/24 to any port 18767 proto tcp   # XP package download
 # Without those, the installer still finishes the server + bridge, but prints
 # a clear warning and skips the :443 TLS listener.
 #
@@ -32,7 +37,13 @@ set -euo pipefail
 
 PIN_COMMIT="9cddb9c"
 SERVER_REPO="https://gitlab.com/valtron/msn-server"
-LAN_IP="192.168.1.81"
+# LAN IP: override with LAN_IP env; otherwise auto-detect the primary IPv4
+# (the address WLM on the XP will connect to). No address is hardcoded.
+if [ -z "${LAN_IP:-}" ]; then
+    LAN_IP="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p')"
+    [ -z "$LAN_IP" ] && LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+if [ -z "$LAN_IP" ]; then echo "could not detect LAN IP; set LAN_IP env and re-run"; exit 1; fi
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 SERVER_DIR="$HERMES_HOME/msn-server"
 VENV="$SERVER_DIR/.venv"
@@ -47,6 +58,7 @@ warn() { echo "[install] WARNING: $*" >&2; }
 
 command -v python3 >/dev/null || { echo "python3 not found"; exit 1; }
 command -v git >/dev/null || { echo "git not found"; exit 1; }
+log "LAN IP: $LAN_IP"
 
 # --- 1. Server code (download at install time, pinned) ---
 if [ -d "$SERVER_DIR/.git" ]; then
@@ -85,6 +97,13 @@ log "creating databases..."
 log "creating accounts (owner + bot)..."
 (cd "$SERVER_DIR" && "$VENV/bin/python" "$SCRIPT_DIR/create-accounts.py")
 
+# --- 5b. Switcher INI files (filled with this host's LAN IP) ---
+mkdir -p "$SERVER_DIR/switcher"
+for exe in msnmsgr wlcomm; do
+    sed "s/__LAN_IP__/$LAN_IP/g" "$SCRIPT_DIR/$exe.exe-escargot.ini.template" > "$SERVER_DIR/switcher/$exe.exe-escargot.ini"
+done
+log "switcher INIs written to $SERVER_DIR/switcher/"
+
 # --- 6. systemd user services ---
 mkdir -p "$HOME/.config/systemd/user"
 NODE_BIN="$(command -v node || ls -d "$HERMES_HOME"/tools/node-*/bin/node 2>/dev/null | sort -V | tail -1)"
@@ -92,7 +111,7 @@ if [ -z "$NODE_BIN" ]; then warn "no node binary found; bridge service will fail
 log "using node: $NODE_BIN"
 
 sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/msn-server.service" > "$HOME/.config/systemd/user/msn-server.service"
-sed -e "s|__HOME__|$HOME|g" -e "s|__NODE_BIN__|$NODE_BIN|g" "$SCRIPT_DIR/hermes-msn-bridge.service" > "$HOME/.config/systemd/user/hermes-msn-bridge.service"
+sed -e "s|__HOME__|$HOME|g" -e "s|__NODE_BIN__|$NODE_BIN|g" -e "s|__SCRIPT_DIR__|$SCRIPT_DIR|g" "$SCRIPT_DIR/hermes-msn-bridge.service" > "$HOME/.config/systemd/user/hermes-msn-bridge.service"
 
 # bridge files (patched msnclient + bridge.js) live under ~/.hermes/msn-bridge
 mkdir -p "$BRIDGE_DIR"
@@ -133,5 +152,14 @@ fi
 
 systemctl --user enable --now hermes-msn-bridge.service
 log "hermes-msn-bridge service started"
+
+# --- 8. XP install package (zip) + its LAN download host ---
+# The package (exe + connection config + CA + Switcher DLL + INIs + README)
+# is built from the live server state, so it never contains stale addresses.
+sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/hermes-xp-package.service" > "$HOME/.config/systemd/user/hermes-xp-package.service"
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-xp-package.service || warn "could not start the package host service"
+bash "$SCRIPT_DIR/build-xp-package.sh" "$SCRIPT_DIR/.." || warn "XP package build failed (the server still works; re-run build-xp-package.sh to retry)"
+
 log "done. Check: systemctl --user status msn-server.service hermes-msn-bridge.service msn-tls.service"
 log "Next: restart the Hermes gateway so the hermes_msn platform connects, then test WLM sign-in on the XP."

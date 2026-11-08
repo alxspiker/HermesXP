@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+*.obj
+*.lib
+catest.exe
+dist/HermesXP-old.exe
+dist/SHA256SUMS

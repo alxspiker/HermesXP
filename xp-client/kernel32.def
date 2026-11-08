@@ -3,3 +3,16 @@ EXPORTS
  _GetModuleHandleA@4=GetModuleHandleA
  _ExitProcess@4=ExitProcess
  _GetComputerNameA@8=GetComputerNameA
+ _GetPrivateProfileStringA@24=GetPrivateProfileStringA
+ _GetModuleFileNameA@12=GetModuleFileNameA
+ _GetFileAttributesA@4=GetFileAttributesA
+ _CopyFileA@12=CopyFileA
+ _GetProcessHeap@0=GetProcessHeap
+ _HeapAlloc@12=HeapAlloc
+ _HeapFree@12=HeapFree
+ _CreateFileA@28=CreateFileA
+ _ReadFile@20=ReadFile
+ _CloseHandle@4=CloseHandle
+ _CreateProcessA@40=CreateProcessA
+ _WriteFile@20=WriteFile
+ _GetLastError@0=GetLastError

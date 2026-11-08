@@ -7,7 +7,12 @@ Wants=network-online.target msn-server.service
 Type=simple
 WorkingDirectory=__HOME__/.hermes/msn-bridge
 EnvironmentFile=__HOME__/.hermes/msn-bridge.env
-ExecStart=__NODE_BIN__ bridge.js
+# Every bot gets its own MSN user, created automatically: make sure the
+# configured bot account exists (creating it with a fresh password if it
+# does not) before the bridge signs in. The ExecStart shell re-reads the env
+# file, so a password written by the pre-step is picked up on this start.
+ExecStartPre=__HOME__/.hermes/msn-server/.venv/bin/python __SCRIPT_DIR__/ensure-bot-user.py __HOME__/.hermes/msn-server
+ExecStart=/bin/bash -c 'set -a; . __HOME__/.hermes/msn-bridge.env; exec __NODE_BIN__ bridge.js'
 Restart=on-failure
 RestartSec=5
 

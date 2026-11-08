@@ -1,0 +1,8 @@
+LIBRARY CRYPT32.dll
+EXPORTS
+ _CryptStringToBinaryA@28=CryptStringToBinaryA
+ _CertOpenStore@20=CertOpenStore
+ _CertCreateCertificateContext@12=CertCreateCertificateContext
+ _CertAddCertificateContextToStore@16=CertAddCertificateContextToStore
+ _CertFreeCertificateContext@4=CertFreeCertificateContext
+ _CertCloseStore@8=CertCloseStore

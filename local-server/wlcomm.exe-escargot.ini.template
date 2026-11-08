@@ -1,0 +1,8 @@
+[debug]
+enable = 0
+hooks = 0
+[options]
+type = msn
+passporturls = 1
+server = __LAN_IP__
+configserver = __LAN_IP__

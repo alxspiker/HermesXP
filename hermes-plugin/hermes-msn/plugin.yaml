@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.1.0
-description: Private loopback bridge between an MSN Messenger bot and the Hermes gateway; optional XP connectivity probe. Pairs with the local MSN server installed by local-server/install.sh (no Escargot account needed).
+version: 0.2.0
+description: "Private loopback bridge between an MSN Messenger bot and the Hermes gateway; optional XP connectivity probe. Pairs with the local MSN server installed by local-server/install.sh (no Escargot account needed). 0.2.0: no hardcoded personal details (owner defaults to user@hermes.local, LAN IP auto-detected); each bot gets its own MSN user auto-created at bridge start; the XP exe rebuilds from source and redeploys to the XP automatically after a plugin update."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process

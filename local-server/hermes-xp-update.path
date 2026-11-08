@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch the hermes-msn plugin for updates (triggers the XP exe rebuild + deploy)
+After=hermes-gateway.service
+
+[Path]
+PathChanged=%h/.hermes/plugins/hermes-msn
+Unit=hermes-xp-update.service
+
+[Install]
+WantedBy=default.target

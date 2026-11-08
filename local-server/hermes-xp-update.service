@@ -1,0 +1,11 @@
+[Unit]
+Description=Rebuild + deploy the HermesXP exe after a plugin update
+After=network-online.target msn-server.service
+Wants=network-online.target msn-server.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/HermesXP/local-server/update-xp.sh %h/HermesXP
+
+[Install]
+WantedBy=default.target

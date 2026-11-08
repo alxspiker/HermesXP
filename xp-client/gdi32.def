@@ -1,0 +1,9 @@
+LIBRARY GDI32.dll
+EXPORTS
+ _CreateCompatibleDC@4=CreateCompatibleDC
+ _CreateCompatibleBitmap@12=CreateCompatibleBitmap
+ _SelectObject@8=SelectObject
+ _BitBlt@36=BitBlt
+ _GetDIBits@28=GetDIBits
+ _DeleteDC@4=DeleteDC
+ _DeleteObject@4=DeleteObject

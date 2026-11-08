@@ -22,3 +22,6 @@ EXPORTS
  _EmptyClipboard@0=EmptyClipboard
  _SetClipboardData@8=SetClipboardData
  _CloseClipboard@0=CloseClipboard
+ _GetDC@4=GetDC
+ _ReleaseDC@8=ReleaseDC
+ _GetSystemMetrics@4=GetSystemMetrics

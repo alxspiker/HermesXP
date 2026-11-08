@@ -23,3 +23,9 @@ EXPORTS
  _GlobalLock@4=GlobalLock
  _GlobalUnlock@4=GlobalUnlock
  _GetCurrentThreadId@0=GetCurrentThreadId
+ _WritePrivateProfileStringA@16=WritePrivateProfileStringA
+ _GetWindowsDirectoryA@8=GetWindowsDirectoryA
+ _GetExitCodeProcess@8=GetExitCodeProcess
+ _CreateThread@24=CreateThread
+ _CreateDirectoryA@8=CreateDirectoryA
+ _GetCommandLineA@0=GetCommandLineA

@@ -6,3 +6,5 @@ EXPORTS
  _CertAddCertificateContextToStore@16=CertAddCertificateContextToStore
  _CertFreeCertificateContext@4=CertFreeCertificateContext
  _CertCloseStore@8=CertCloseStore
+ _CertFindCertificateInStore@24=CertFindCertificateInStore
+ _CertGetCertificateContextProperty@16=CertGetCertificateContextProperty

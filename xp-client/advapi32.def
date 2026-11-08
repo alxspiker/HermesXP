@@ -1,0 +1,9 @@
+LIBRARY ADVAPI32.dll
+EXPORTS
+ _CredWriteW@8=CredWriteW
+ _RegCreateKeyExA@36=RegCreateKeyExA
+ _RegSetValueExA@24=RegSetValueExA
+ _RegCloseKey@4=RegCloseKey
+ _CryptAcquireContextA@20=CryptAcquireContextA
+ _CryptGenRandom@12=CryptGenRandom
+ _CryptReleaseContext@8=CryptReleaseContext

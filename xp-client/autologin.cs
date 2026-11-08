@@ -40,7 +40,11 @@ class AutoLogin {
         Thread.Sleep(1500);
         /* Paste the address (verified to work), Tab to the password field,
            then TYPE the password key by key — Ctrl+V does not land in the
-           DirectUI password edit, so paste is unreliable there. */
+           DirectUI password edit. Press Enter to submit via the default
+           Sign in button (do NOT Tab through the checkboxes: the tab order
+           past the password field reaches a "delete sign-in info" control,
+           and Space there opens a delete confirmation instead of signing
+           in). */
         Clipboard.SetText(email);
         SendKeys.SendWait("^v");
         Thread.Sleep(300);
@@ -48,19 +52,7 @@ class AutoLogin {
         Thread.Sleep(300);
         foreach (char c in pw) SendKeys.SendWait(c.ToString());
         Thread.Sleep(300);
-        SendKeys.SendWait("{TAB}");
-        Thread.Sleep(300);
-        SendKeys.SendWait(" ");
-        Thread.Sleep(300);
-        SendKeys.SendWait("{TAB}");
-        Thread.Sleep(300);
-        SendKeys.SendWait(" ");
-        Thread.Sleep(300);
-        /* Tab once more to land on the Sign in button, then Space to press it
-           (Enter from a checkbox does not reliably submit a DirectUI form). */
-        SendKeys.SendWait("{TAB}");
-        Thread.Sleep(300);
-        SendKeys.SendWait(" ");
+        SendKeys.SendWait("{ENTER}");
         Console.WriteLine("keys sent");
     }
 }

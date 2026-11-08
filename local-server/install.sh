@@ -137,7 +137,7 @@ else
     else
         log "server cert already exists, leaving it alone"
     fi
-    sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/stunnel.conf" > "$SERVER_DIR/stunnel.conf"
+    sed -e "s|__HOME__|$HOME|g" -e "s|__LAN_IP__|$LAN_IP|g" "$SCRIPT_DIR/stunnel.conf" > "$SERVER_DIR/stunnel.conf"
     sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/msn-tls.service" > "$HOME/.config/systemd/user/msn-tls.service"
     systemctl --user daemon-reload
     if [ "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)" != "0" ]; then

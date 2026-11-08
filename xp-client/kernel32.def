@@ -16,3 +16,6 @@ EXPORTS
  _CreateProcessA@40=CreateProcessA
  _WriteFile@20=WriteFile
  _GetLastError@0=GetLastError
+ _GetFileSize@8=GetFileSize
+ _WaitForSingleObject@8=WaitForSingleObject
+ _Sleep@4=Sleep

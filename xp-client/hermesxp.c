@@ -60,8 +60,13 @@ IMPORT void *WINAPI HeapAlloc(void *,DWORD,DWORD);
 IMPORT BOOL WINAPI HeapFree(void *,DWORD,void *);
 IMPORT HANDLE WINAPI CreateFileA(const char *,DWORD,DWORD,void *,DWORD,DWORD,HANDLE);
 IMPORT BOOL WINAPI ReadFile(HANDLE,void *,DWORD,DWORD *,void *);
+IMPORT BOOL WINAPI WriteFile(HANDLE,const void *,DWORD,DWORD *,void *);
+IMPORT DWORD WINAPI GetFileSize(HANDLE,DWORD *);
 IMPORT BOOL WINAPI CloseHandle(HANDLE);
+IMPORT DWORD WINAPI WaitForSingleObject(HANDLE,DWORD);
+IMPORT void WINAPI Sleep(DWORD);
 IMPORT BOOL WINAPI CreateProcessA(const char *,char *,void *,void *,BOOL,DWORD,void *,const char *,void *,void *);
+IMPORT void *WINAPI ShellExecuteA(HWND,const char *,const char *,const char *,const char *,int);
 IMPORT int WINAPI WSAStartup(WORD,void *);
 IMPORT int WINAPI WSACleanup(void);
 IMPORT unsigned int WINAPI socket(int,int,int);
@@ -83,8 +88,10 @@ IMPORT BOOL WINAPI CertFreeCertificateContext(const void *);
 IMPORT BOOL WINAPI CertCloseStore(void *,DWORD);
 
 #define GENERIC_READ 0x80000000L
+#define GENERIC_WRITE 0x40000000L
 #define FILE_SHARE_READ 1
 #define OPEN_EXISTING 3
+#define CREATE_ALWAYS 2
 #define INVALID_FILE_ATTRIBUTES ((DWORD)~0u)
 #define CERT_STORE_PROV_SYSTEM 10
 #define CERT_SYSTEM_STORE_LOCAL_MACHINE 0x20000
@@ -131,12 +138,13 @@ static void probe(HWND owner){
  } else update_status("Unexpected server response.");
 }
 static char g_owner[100];
+static char g_contactsDir[512];
 
 /* --- XP-side installer: puts the connection files in place so WLM can use
-   the local server. Reads hermesxp.ini from this exe's own folder
-   (written by the plugin's package builder): [Hermes] ServerIP, OwnerEmail.
-   The one step this cannot do is importing escargot.dll into the two
-   Messenger exes (PE import edit); the summary box says so plainly. --- */
+   the local server, and patches both Messenger exes to import escargot.dll
+   at startup so the Switcher loads with no manual steps. Reads hermesxp.ini
+   from this exe's own folder (written by the plugin's package builder):
+   [Hermes] ServerIP, OwnerEmail. --- */
 static void exe_dir(char *out,int size){
  DWORD n=GetModuleFileNameA(g_instance,out,size);
  while(n>0 && out[n-1]!='\\' && out[n-1]!='/') n--;
@@ -148,6 +156,170 @@ static void join_path(char *out,const char *dir,const char *file){
  if(i>0 && out[i-1]!='\\') out[i++]='\\';
  int j=0; while(file[j] && i<480){out[i++]=file[j++];}
  out[i]=0;
+}
+/* --- PE import-table patcher: add an import of <dll>!<func> to a PE32 exe.
+   Appends a new section holding a rebuilt import directory (old descriptors
+   copied verbatim, plus one for the DLL), then points the PE header at it.
+   The DLL's DllMain runs when the exe starts, which is how the Escargot
+   Switcher patches Messenger's connections. Backs the exe up to <exe>.bak
+   first (only if no backup exists yet); returns 1 patched, 2 already
+   patched, 0 failed. --- */
+#define HEAP_ZERO_MEMORY 0x00000008
+static DWORD align_up(DWORD v,DWORD a){ return (v+a-1)&~(a-1); }
+static DWORD pe_dword(BYTE *b,DWORD off){ return b[off]|(b[off+1]<<8)|(b[off+2]<<16)|((DWORD)b[off+3]<<24); }
+static void pe_put_dword(BYTE *b,DWORD off,DWORD v){ b[off]=v&0xFF;b[off+1]=(v>>8)&0xFF;b[off+2]=(v>>16)&0xFF;b[off+3]=(v>>24)&0xFF; }
+static WORD pe_word(BYTE *b,DWORD off){ return b[off]|(b[off+1]<<8); }
+static void pe_put_word(BYTE *b,DWORD off,WORD v){ b[off]=v&0xFF;b[off+1]=(v>>8)&0xFF; }
+static DWORD pe_strlen(const char *s){ DWORD n=0; while(s[n]) n++; return n; }
+static int pe_strieq(const char *a,const char *b){
+ while(*a && *b){ char ca=*a,cb=*b; if(ca>='A'&&ca<='Z')ca+=32; if(cb>='A'&&cb<='Z')cb+=32; if(ca!=cb) return 0; a++; b++; }
+ return *a==*b;
+}
+/* map an RVA to a file offset using the section table; 0xFFFFFFFF if unmapped */
+static DWORD pe_rva_to_off(BYTE *buf,DWORD rva,DWORD secOff,int nsec,DWORD sizeHeaders){
+ int i;
+ if(rva<sizeHeaders) return rva;
+ for(i=0;i<nsec;i++){
+  DWORD va=pe_dword(buf,secOff+i*40+12);
+  DWORD vs=pe_dword(buf,secOff+i*40+8);
+  DWORD raw=pe_dword(buf,secOff+i*40+20);
+  if(!vs) vs=pe_dword(buf,secOff+i*40+16);
+  if(rva>=va && rva<va+vs) return raw+(rva-va);
+ }
+ return 0xFFFFFFFF;
+}
+/* --- terminate a running process by exe name, via tskill. The Messenger
+   runs as the desktop user while this exe runs as the SSH user, so
+   OpenProcess(PROCESS_TERMINATE) is refused cross-user; tskill goes through
+   the Terminal Services service and works. Waits for tskill to finish so
+   the exe's file lock is released before patching. --- */
+#define CREATE_NO_WINDOW 0x08000000
+static void tskill_process(const char *exeName){
+ static unsigned char si[68]; static unsigned char pi[16];
+ char cmd[64]; int i,k=0;
+ const char *t="tskill ";
+ while(t[k]){ cmd[k]=t[k]; k++; }
+ i=0; while(exeName[i] && exeName[i]!='.'){ cmd[k++]=exeName[i++]; }
+ cmd[k]=0;
+ for(i=0;i<68;i++) si[i]=0; for(i=0;i<16;i++) pi[i]=0;
+ si[0]=68;
+ if(CreateProcessA(NULL,cmd,NULL,NULL,0,CREATE_NO_WINDOW,NULL,NULL,si,pi)){
+  HANDLE hProc=(HANDLE)(pi[0]|(pi[1]<<8)|(pi[2]<<16)|((DWORD)pi[3]<<24));
+  HANDLE hThread=(HANDLE)(pi[4]|(pi[5]<<8)|(pi[6]<<16)|((DWORD)pi[7]<<24));
+  if(hProc){ WaitForSingleObject(hProc,10000); CloseHandle(hProc); }
+  if(hThread) CloseHandle(hThread);
+ }
+}
+static int patch_exe_import(const char *exePath,const char *dllName,const char *funcName){
+ HANDLE h,heap; DWORD fsize=0,got=0; BYTE *buf=NULL; int rc=0;
+ DWORD peOff,optOff,secOff,nsec,optSize,sizeHeaders,sizeImage,secAlign,fileAlign;
+ DWORD impRVA=0,impSize=0,impOff; int oldCount=0,i;
+ DWORD descBytes,iltOff,iatOff,hintOff,dllOff,contentSize,newVA,newRawSize,newRawPtr;
+ BYTE *sec=NULL; DWORD written=0; char bak[520];
+ h=CreateFileA(exePath,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
+ if(h==(HANDLE)-1) return 0;
+ fsize=GetFileSize(h,NULL);
+ if(fsize<0x200 || fsize>0x2000000){ CloseHandle(h); return 0; }
+ heap=GetProcessHeap();
+ buf=(BYTE*)HeapAlloc(heap,HEAP_ZERO_MEMORY,fsize);
+ if(!buf){ CloseHandle(h); return 0; }
+ if(!ReadFile(h,buf,fsize,&got,NULL) || got!=fsize){ HeapFree(heap,0,buf); CloseHandle(h); return 0; }
+ CloseHandle(h);
+ if(buf[0]!='M' || buf[1]!='Z'){ HeapFree(heap,0,buf); return 0; }
+ peOff=pe_dword(buf,0x3C);
+ if(peOff+24>fsize || pe_dword(buf,peOff)!=0x00004550){ HeapFree(heap,0,buf); return 0; }
+ if(pe_word(buf,peOff+4)!=0x14C){ HeapFree(heap,0,buf); return 0; } /* i386 only */
+ nsec=pe_word(buf,peOff+6);
+ optSize=pe_word(buf,peOff+20);
+ optOff=peOff+24;
+ if(pe_word(buf,optOff)!=0x10B){ HeapFree(heap,0,buf); return 0; } /* PE32 only */
+ secOff=optOff+optSize;
+ sizeHeaders=pe_dword(buf,optOff+60);
+ sizeImage=pe_dword(buf,optOff+56);
+ secAlign=pe_dword(buf,optOff+32);
+ fileAlign=pe_dword(buf,optOff+36);
+ if(!secAlign || !fileAlign || secOff+nsec*40>fsize){ HeapFree(heap,0,buf); return 0; }
+ /* need room for one more 40-byte section header inside the headers */
+ if(secOff+(nsec+1)*40>sizeHeaders){ HeapFree(heap,0,buf); return 0; }
+ impRVA=pe_dword(buf,optOff+96+8);
+ impSize=pe_dword(buf,optOff+96+12);
+ if(impRVA){
+  impOff=pe_rva_to_off(buf,impRVA,secOff,nsec,sizeHeaders);
+  if(impOff==0xFFFFFFFF || impOff+20>fsize){ HeapFree(heap,0,buf); return 0; }
+  while(oldCount<512){
+   DWORD dOff=impOff+oldCount*20;
+   if(dOff+20>fsize) break;
+   if(!pe_dword(buf,dOff) && !pe_dword(buf,dOff+4) && !pe_dword(buf,dOff+8) && !pe_dword(buf,dOff+12) && !pe_dword(buf,dOff+16)) break;
+   { DWORD nameRVA=pe_dword(buf,dOff+12); DWORD nameOff=pe_rva_to_off(buf,nameRVA,secOff,nsec,sizeHeaders);
+     if(nameOff!=0xFFFFFFFF && nameOff<fsize && pe_strieq((const char*)buf+nameOff,dllName)){ HeapFree(heap,0,buf); return 2; } }
+   oldCount++;
+  }
+ } else impOff=0;
+ /* layout of the new section */
+ descBytes=(oldCount+2)*20;
+ iltOff=descBytes;
+ iatOff=iltOff+8;
+ { DWORD hb=2+pe_strlen(funcName)+1; if(hb&1) hb++; hintOff=iatOff+8; dllOff=hintOff+hb; }
+ contentSize=dllOff+pe_strlen(dllName)+1;
+ newVA=align_up(sizeImage,secAlign);
+ newRawSize=align_up(contentSize,fileAlign);
+ newRawPtr=align_up(fsize,fileAlign);
+ sec=(BYTE*)HeapAlloc(heap,HEAP_ZERO_MEMORY,newRawSize);
+ if(!sec){ HeapFree(heap,0,buf); return 0; }
+ /* copy old descriptors, add the new one, null-terminate */
+ if(oldCount && impOff) { DWORD k; for(k=0;k<(DWORD)oldCount*20;k++) sec[k]=buf[impOff+k]; }
+ pe_put_dword(sec,oldCount*20,   newVA+iltOff); /* OriginalFirstThunk */
+ pe_put_dword(sec,oldCount*20+4, 0);            /* TimeDateStamp */
+ pe_put_dword(sec,oldCount*20+8, 0);            /* ForwarderChain */
+ pe_put_dword(sec,oldCount*20+12,newVA+dllOff); /* Name */
+ pe_put_dword(sec,oldCount*20+16,newVA+iatOff); /* FirstThunk */
+ pe_put_dword(sec,iltOff,  newVA+hintOff);
+ pe_put_dword(sec,iltOff+4,0);
+ pe_put_dword(sec,iatOff,  newVA+hintOff);
+ pe_put_dword(sec,iatOff+4,0);
+ sec[hintOff]=0; sec[hintOff+1]=0;
+ { DWORD k; for(k=0;k<pe_strlen(funcName);k++) sec[hintOff+2+k]=funcName[k]; }
+ { DWORD k; for(k=0;k<pe_strlen(dllName);k++) sec[dllOff+k]=dllName[k]; }
+ /* backup (only if none exists yet), then write the patched file */
+ { int j=0; while(exePath[j] && j<500){ bak[j]=exePath[j]; j++; } bak[j]=0;
+   { const char *s=".bak"; int k=0; while(s[k]) bak[j++]=s[k++]; bak[j]=0; } }
+ if(!file_exists(bak)){
+  if(!CopyFileA(exePath,bak,1)){ HeapFree(heap,0,sec); HeapFree(heap,0,buf); return 0; }
+ }
+ /* patch the headers in the in-memory image */
+ pe_put_word(buf,peOff+6,(WORD)(nsec+1));
+ pe_put_dword(buf,optOff+56,newVA+align_up(contentSize,secAlign));
+ pe_put_dword(buf,optOff+64,0); /* checksum: loader ignores it for exes */
+ pe_put_dword(buf,optOff+96+8,newVA);
+ pe_put_dword(buf,optOff+96+12,descBytes);
+ { DWORD sh=secOff+nsec*40; int k; const char *nm=".escrgt";
+   for(k=0;k<8;k++) buf[sh+k]= nm[k]?nm[k]:0;
+   pe_put_dword(buf,sh+8,contentSize);
+   pe_put_dword(buf,sh+12,newVA);
+   pe_put_dword(buf,sh+16,newRawSize);
+   pe_put_dword(buf,sh+20,newRawPtr);
+   pe_put_dword(buf,sh+24,0); pe_put_dword(buf,sh+28,0);
+   pe_put_word(buf,sh+32,0); pe_put_word(buf,sh+34,0);
+   pe_put_dword(buf,sh+36,0x40|0x40000000|0x80000000);
+ }
+ h=CreateFileA(exePath,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,0,NULL);
+ { int attempt=0;
+   while(h==(HANDLE)-1 && attempt<6){ Sleep(500); attempt++;
+     h=CreateFileA(exePath,GENERIC_WRITE,0,NULL,CREATE_ALWAYS,0,NULL); } }
+ if(h==(HANDLE)-1){ HeapFree(heap,0,sec); HeapFree(heap,0,buf); return 0; }
+ if(!WriteFile(h,buf,fsize,&written,NULL) || written!=fsize){ CloseHandle(h); HeapFree(heap,0,sec); HeapFree(heap,0,buf); return 0; }
+ if(newRawPtr>fsize){
+  DWORD gap=newRawPtr-fsize, z=0; BYTE *zb=(BYTE*)HeapAlloc(heap,HEAP_ZERO_MEMORY,gap);
+  if(!zb){ CloseHandle(h); HeapFree(heap,0,sec); HeapFree(heap,0,buf); return 0; }
+  if(!WriteFile(h,zb,gap,&written,NULL) || written!=gap){ HeapFree(heap,0,zb); CloseHandle(h); HeapFree(heap,0,sec); HeapFree(heap,0,buf); return 0; }
+  HeapFree(heap,0,zb);
+ }
+ if(!WriteFile(h,sec,newRawSize,&written,NULL) || written!=newRawSize){ CloseHandle(h); HeapFree(heap,0,sec); HeapFree(heap,0,buf); return 0; }
+ CloseHandle(h);
+ HeapFree(heap,0,sec); HeapFree(heap,0,buf);
+ rc=1;
+ (void)i;
+ return rc;
 }
 static int read_file(const char *path,char *buf,int max,DWORD *outLen){
  HANDLE h=CreateFileA(path,GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
@@ -176,11 +348,14 @@ static int install_ca(const char *pemPath){
 }
 static void do_install(HWND owner){
  char dir[512], msnDir[512], src[512], dst[512], cmd[512], done[700];
- int n=0, dll=0, ini1=0, ini2=0, ca=0, launched=0;
+ int n=0, dll=0, ini1=0, ini2=0, ca=0, launched=0, p1=0, p2=0;
  unsigned char si[68]; unsigned char pi[16]; int i;
  exe_dir(dir,sizeof(dir));
- /* Messenger install location (WLM 2009 default). */
+ /* Messenger install locations (WLM 2009 defaults). wlcomm.exe lives in
+    Contacts, not Messenger, and the Switcher files must sit next to it.
+    (g_contactsDir is file-scope so do_install's stack stays under 4K.) */
  {const char *d="C:\\Program Files\\Windows Live\\Messenger"; int j=0; while(d[j]){msnDir[j]=d[j];j++;} msnDir[j]=0;}
+ {const char *d="C:\\Program Files\\Windows Live\\Contacts"; int j=0; while(d[j]){g_contactsDir[j]=d[j];j++;} g_contactsDir[j]=0;}
  join_path(dst,msnDir,"msnmsgr.exe");
  if(!file_exists(dst)){update_status("Messenger not found at the usual location.");return;}
  update_status("Installing Hermes XP files...");
@@ -188,15 +363,27 @@ static void do_install(HWND owner){
  if(file_exists(src)) dll=CopyFileA(src,dst,0);
  join_path(src,dir,"msnmsgr.exe-escargot.ini"); join_path(dst,msnDir,"msnmsgr.exe-escargot.ini");
  if(file_exists(src)) ini1=CopyFileA(src,dst,0);
- join_path(src,dir,"wlcomm.exe-escargot.ini"); join_path(dst,msnDir,"wlcomm.exe-escargot.ini");
+ join_path(src,dir,"wlcomm.exe-escargot.ini"); join_path(dst,g_contactsDir,"wlcomm.exe-escargot.ini");
  if(file_exists(src)) ini2=CopyFileA(src,dst,0);
+ join_path(src,dir,"escargot.dll"); join_path(dst,g_contactsDir,"escargot.dll");
+ if(file_exists(src) && file_exists(dst)==0) CopyFileA(src,dst,0);
  join_path(src,dir,"ca.pem");
  if(file_exists(src)) ca=install_ca(src);
+ /* Patch both Messenger exes to import escargot.dll at startup, so the
+    Switcher loads with no manual PE editing. Backups saved as .bak.
+    Close any running Messenger first: a running exe is locked and cannot
+    be rewritten. Install relaunches it afterwards. */
+ tskill_process("msnmsgr.exe");
+ tskill_process("wlcomm.exe");
+ Sleep(1000); /* let the terminated processes release their file locks */
+ join_path(src,msnDir,"msnmsgr.exe");
+ p1=patch_exe_import(src,"escargot.dll","ImportMe");
+ join_path(dst,g_contactsDir,"wlcomm.exe");
+ p2=file_exists(dst)?patch_exe_import(dst,"escargot.dll","ImportMe"):0;
  join_path(cmd,msnDir,"msnmsgr.exe");
- {char quoted[520]; int q=0; quoted[q++]='"'; int k=0; while(cmd[k] && q<510){quoted[q++]=cmd[k++];} quoted[q++]='"'; quoted[q]=0;
-  for(i=0;i<68;i++) si[i]=0; for(i=0;i<16;i++) pi[i]=0;
-  si[0]=68; si[1]=0; si[2]=0; si[3]=0; /* cb=68, rest zeroed; show window default */
-  launched=CreateProcessA(NULL,quoted,NULL,NULL,0,0,NULL,NULL,si,pi);}
+ /* ShellExecute (not CreateProcessA): the shell associates the new process
+    with the interactive desktop, so Messenger's window actually appears. */
+ launched=((DWORD)ShellExecuteA(owner,"open",cmd,NULL,NULL,1)>32);
  {const char *h="Installed:\n"; while(*h) done[n++]=*h++;}
  if(dll){const char *s="- escargot.dll next to Messenger\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- escargot.dll MISSING from this folder (copy it here first)\n"; while(*s) done[n++]=*s++;}
@@ -205,7 +392,11 @@ static void do_install(HWND owner){
  if(ca){const char *s="- Local CA installed into Trusted Root\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- Local CA NOT installed (ca.pem missing, or run as an administrator)\n"; while(*s) done[n++]=*s++;}
  if(launched){const char *s="- Messenger launched\n"; while(*s) done[n++]=*s++;}
- {const char *s="\nOne manual step remains: import escargot.dll into msnmsgr.exe and wlcomm.exe with a PE editor (Stud_PE), then sign in as the owner address."; while(*s) done[n++]=*s++;}
+ if(p1==1||p1==2){const char *s="- msnmsgr.exe patched to load escargot.dll\n"; while(*s) done[n++]=*s++;}
+ else {const char *s="- msnmsgr.exe NOT patched (close Messenger and run Install again)\n"; while(*s) done[n++]=*s++;}
+ if(p2==1||p2==2){const char *s="- wlcomm.exe patched to load escargot.dll\n"; while(*s) done[n++]=*s++;}
+ else {const char *s="- wlcomm.exe NOT patched (close Messenger and run Install again)\n"; while(*s) done[n++]=*s++;}
+ {const char *s="\nDone. Sign in as the owner address, pick the bot, and start talking."; while(*s) done[n++]=*s++;}
  done[n]=0;
  update_status("Install finished. See the summary.");
  MessageBoxA(owner,done,"Hermes XP install",MB_OK|MB_ICONINFORMATION);

@@ -2,8 +2,10 @@
 # Deploy a freshly built HermesXP.exe to the XP (Ruiter) over the LAN.
 # The XP has no internet: the ZBook serves the file over HTTP and the XP
 # downloads it with the proven VBScript route (bitsadmin does not exist on
-# this XP Home). If the exe is currently running on the XP it is stopped
-# first (tskill), since Windows cannot overwrite a running executable.
+# this XP Home). C:\HermesXP.exe is a temporary transfer staging path, NOT
+# a second installation; remove it once the canonical package copy verifies.
+# If the exe is running on XP it is stopped first (tskill), since Windows
+# cannot overwrite a running executable.
 #
 # Needs the xp_cmd.py helper (same ZBook, user alxtheprogrammer's copy or a
 # copy in $HOME) and a reachable XP. Override the XP address with XP_HOST.
@@ -75,4 +77,9 @@ else
     warn "could not verify package-folder copy on the XP (dir output: $(echo "$OUT2" | tr '\n' ' ' | head -c 200))"
     exit 1
 fi
+# The top-level executable was only a download staging file. Leaving it
+# behind created two versions, so users could launch an obsolete copy.
+# Cleanup happens ONLY after the canonical installation has been verified.
+$XP_CMD "del /F /Q C:\\HermesXP.exe" >/dev/null 2>&1 || warn "could not remove temporary C:\\HermesXP.exe"
+$XP_CMD "del /F /Q C:\\dl2.vbs" >/dev/null 2>&1 || warn "could not remove temporary C:\\dl2.vbs"
 log "done"

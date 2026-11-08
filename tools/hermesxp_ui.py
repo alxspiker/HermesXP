@@ -1,0 +1,124 @@
+"""Minimal authenticated client for the HermesXP screen/control listener.
+
+The XP companion expects a 64-digit hex token in X-Hermes-Token.
+This client deliberately limits inputs to what the companion accepts.
+"""
+
+from __future__ import annotations
+
+import http.client
+import ipaddress
+import re
+from dataclasses import dataclass
+
+
+_ALLOWED_KEYS = frozenset((
+    "Enter", "Tab", "Esc", "Backspace", "Delete",
+    "Left", "Up", "Right", "Down",
+))
+
+
+def validate_token(token: str) -> str:
+    return isinstance(token, str) and re.fullmatch(r"[0-9a-fA-F]{64}", token) is not None
+
+
+def validate_click(
+    x: int, y: int, width: int, height: int, button: str = "left"
+) -> tuple[int, int, str]:
+    if (
+        any(type(v) is not int for v in (x, y, width, height))
+        or width < 1 or height < 1
+        or not 0 <= x < width or not 0 <= y < height
+        or button not in ("left", "right")
+    ):
+        raise ValueError("Click must have in-bounds integer coordinates and left/right button")
+    return x, y, button
+
+
+def validate_text(text: str) -> bytes:
+    if not isinstance(text, str) or not 1 <= len(text) <= 128:
+        raise ValueError("Text must contain 1–128 characters")
+    if any(not 32 <= ord(char) <= 126 for char in text):
+        raise ValueError("Text may only contain printable ASCII characters")
+    return text.encode("ascii")
+
+
+def validate_key(key: str) -> bytes:
+    if key not in _ALLOWED_KEYS:
+        raise ValueError("Unsupported key name")
+    return key.encode("ascii")
+
+
+@dataclass
+class HermesXPClient:
+    host: str
+    token: str
+    port: int = 18768
+    timeout: float = 5.0
+
+    def __post_init__(self) -> None:
+        address = ipaddress.ip_address(self.host)
+        if address.version != 4 or not (address.is_private or address.is_loopback):
+            raise ValueError("HermesXP host must be a private or loopback IPv4 address")
+        if not validate_token(self.token):
+            raise ValueError("HermesXP token must be exactly 64 hexadecimal characters")
+        if type(self.port) is not int or not 1 <= self.port <= 65535:
+            raise ValueError("Invalid port")
+
+    def _request(self, method: str, path: str, body: bytes = b"") -> bytes:
+        connection = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        try:
+            connection.request(
+                method, path, body=body,
+                headers={"X-Hermes-Token": self.token, "Content-Length": str(len(body))},
+            )
+            response = connection.getresponse()
+            payload = response.read()
+            if response.status != 200:
+                raise RuntimeError(f"HermesXP returned HTTP {response.status}: {payload[:120]!r}")
+            return payload
+        finally:
+            connection.close()
+
+    def screenshot(self) -> bytes:
+        return self._request("GET", "/screenshot.bmp")
+
+    def inspect(self) -> str:
+        return self._request("GET", "/ui/inspect").decode("ascii", "replace")
+
+    def click(self, x: int, y: int, width: int, height: int, button: str = "left") -> str:
+        x, y, button = validate_click(x, y, width, height, button)
+        payload = f"x={x}&y={y}&button={button}".encode("ascii")
+        return self._request("POST", "/ui/click", payload).decode("ascii", "replace")
+
+    def type_text(self, text: str) -> str:
+        return self._request("POST", "/ui/type", validate_text(text)).decode("ascii", "replace")
+
+    def key(self, name: str) -> str:
+        return self._request("POST", "/ui/key", validate_key(name)).decode("ascii", "replace")
+
+
+def request(
+    host: str, path: str, token: str, body: bytes = b"", *, port: int = 18768,
+    timeout: float = 5.0,
+) -> tuple[str, bytes]:
+    """Make an authenticated local control call, returning type and raw response."""
+    client = HermesXPClient(host=host, token=token, port=port, timeout=timeout)
+    if path not in ("/ui/inspect", "/ui/click", "/ui/type", "/ui/key", "/screenshot.bmp"):
+        raise ValueError("Unsupported endpoint")
+    if not isinstance(body, bytes):
+        raise ValueError("Request body must be bytes")
+    method = "GET" if path in ("/ui/inspect", "/screenshot.bmp") else "POST"
+    connection = http.client.HTTPConnection(client.host, client.port, timeout=client.timeout)
+    try:
+        connection.request(
+            method, path, body=body,
+            headers={"X-Hermes-Token": client.token, "Content-Length": str(len(body))},
+        )
+        response = connection.getresponse()
+        payload = response.read()
+        if response.status != 200:
+            raise RuntimeError(f"HermesXP returned HTTP {response.status}: {payload[:120]!r}")
+        return response.getheader("Content-Type", ""), payload
+    finally:
+        connection.close()

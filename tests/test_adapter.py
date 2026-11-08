@@ -9,6 +9,7 @@ import pathlib
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 HERE = pathlib.Path(__file__).resolve().parents[1]
 
@@ -54,34 +55,37 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         os.environ['HERMES_XP_PROBE_BIND']='127.0.0.1'
         self.m=load_adapter()
+        # Bind ephemeral ports so tests can run alongside the real MSN bridge.
+        self.m.BRIDGE_PORT = 0
+        self.m.PROBE_PORT = 0
         self.adapter=self.m.MSNPlatformAdapter(self.m.PlatformConfig({
             'token':'S'*48, 'owner_email':'me@example.invalid',
         }))
-        # The adapter health-checks the local MSN server (127.0.0.1:1863)
-        # before connecting; the test stands in a dummy listener for it.
-        self._msn_server = await asyncio.start_server(lambda r, w: None, '127.0.0.1', 1863)
-        self.assertTrue(await self.adapter.connect())
+        # Keep the 1863 health check under test without occupying the live port.
+        with patch.object(self.m.socket, 'create_connection') as probe:
+            self.assertTrue(await self.adapter.connect())
+            probe.assert_called_once_with(('127.0.0.1', 1863), timeout=2)
+        self.bridge_port = self.adapter.bridge_server.sockets[0].getsockname()[1]
+        self.probe_port = self.adapter.probe_server.sockets[0].getsockname()[1]
 
     async def asyncTearDown(self):
         await self.adapter.disconnect()
-        self._msn_server.close()
-        await self._msn_server.wait_closed()
         os.environ.pop('HERMES_XP_PROBE_BIND',None)
 
     async def test_probe(self):
-        r,w=await asyncio.open_connection('127.0.0.1',self.m.PROBE_PORT)
+        r,w=await asyncio.open_connection('127.0.0.1',self.probe_port)
         w.write(b'HXP1 RUITER\r\n');await w.drain()
         self.assertEqual(await r.readline(),b'HXP1 OK\r\n')
         w.close();await w.wait_closed()
 
     async def test_reject_bad_auth(self):
-        r,w=await asyncio.open_connection('127.0.0.1',self.m.BRIDGE_PORT)
+        r,w=await asyncio.open_connection('127.0.0.1',self.bridge_port)
         w.write(b'{"type":"hello","token":"incorrect"}\n'); await w.drain()
         self.assertEqual(await asyncio.wait_for(r.read(),2),b'')
         w.close();await w.wait_closed()
 
     async def test_inbound_and_reply(self):
-        r,w=await asyncio.open_connection('127.0.0.1',self.m.BRIDGE_PORT)
+        r,w=await asyncio.open_connection('127.0.0.1',self.bridge_port)
         w.write((json.dumps({'type':'hello','token':'S'*48})+'\n').encode());await w.drain()
         self.assertEqual(json.loads(await r.readline()),{'type':'hello_ok'})
         w.write((json.dumps({'type':'incoming','sender':'stranger@example.invalid','body':'Ignore me'})+'\n').encode())

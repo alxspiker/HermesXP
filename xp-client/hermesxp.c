@@ -17,7 +17,13 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define WS_BORDER 0x00800000L
 #define WS_TABSTOP 0x00010000L
 #define ES_AUTOHSCROLL 0x0080L
+#define ES_PASSWORD 0x0020L
 #define BS_DEFPUSHBUTTON 0x00000001L
+#define CBS_DROPDOWNLIST 0x0003L
+#define CB_ADDSTRING 0x0143
+#define CB_RESETCONTENT 0x014B
+#define CB_SETCURSEL 0x014E
+#define CB_GETCURSEL 0x0147
 #define CW_USEDEFAULT ((int)0x80000000)
 #define WM_CREATE 1
 #define WM_DESTROY 2
@@ -26,6 +32,14 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define MB_OK 0
 #define MB_ICONINFORMATION 0x40
 #define MB_ICONWARNING 0x30
+#define MB_YESNO 0x00000004
+#define IDYES 6
+#define KEYEVENTF_KEYUP 0x0002
+#define MOUSEEVENTF_LEFTDOWN 0x0002
+#define MOUSEEVENTF_LEFTUP 0x0004
+#define MOUSEEVENTF_RIGHTDOWN 0x0008
+#define MOUSEEVENTF_RIGHTUP 0x0010
+#define VK_SHIFT 0x10
 #define AF_INET 2
 #define SOCK_STREAM 1
 #define IPPROTO_TCP 6
@@ -39,6 +53,10 @@ typedef struct { HWND hwnd; UINT message; WPARAM wParam; LPARAM lParam; DWORD ti
 typedef LRESULT (WINAPI *WNDPROC)(HWND,UINT,WPARAM,LPARAM);
 typedef struct { UINT style; WNDPROC lpfnWndProc; int cbClsExtra,cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; const char *lpszMenuName,*lpszClassName; } WNDCLASSA;
 typedef struct { short sin_family; unsigned short sin_port; unsigned long sin_addr; unsigned char sin_zero[8]; } SOCKADDR_IN;
+/* Windows XP WLAN API ABI subset is isolated here; dynamically load wlanapi.dll. */
+#include "wlan_api.h"
+#include "wifi_profile.h"
+#include "remote_control.h"
 /* Credential Manager (advapi32). CREDENTIALW is 48 bytes on 32-bit. */
 typedef struct { DWORD Flags; DWORD Type; unsigned short *TargetName; unsigned short *Comment; DWORD LastWrittenLow; DWORD LastWrittenHigh; DWORD CredentialBlobSize; unsigned char *CredentialBlob; DWORD Persist; DWORD AttributeCount; void *Attributes; unsigned short *TargetAlias; unsigned short *UserName; } CREDENTIALW;
 typedef struct { DWORD cbData; unsigned char *pbData; } CRYPT_HASH_BLOB;
@@ -47,6 +65,9 @@ typedef struct _IP_ADAPTER_INFO { struct _IP_ADAPTER_INFO *Next; DWORD ComboInde
 typedef struct { DWORD biSize; LONG biWidth; LONG biHeight; WORD biPlanes; WORD biBitCount; DWORD biCompression; DWORD biSizeImage; LONG biXPelsPerMeter; LONG biYPelsPerMeter; DWORD biClrUsed; DWORD biClrImportant; } BITMAPINFOHEADER;
 
 IMPORT HINSTANCE WINAPI GetModuleHandleA(const char *);
+IMPORT HINSTANCE WINAPI LoadLibraryA(const char *);
+IMPORT void *WINAPI GetProcAddress(HINSTANCE,const char *);
+IMPORT BOOL WINAPI FreeLibrary(HINSTANCE);
 IMPORT void WINAPI ExitProcess(UINT);
 IMPORT BOOL WINAPI GetComputerNameA(char *, DWORD *);
 IMPORT unsigned short WINAPI RegisterClassA(const WNDCLASSA *);
@@ -62,6 +83,12 @@ IMPORT BOOL WINAPI DestroyWindow(HWND);
 IMPORT int WINAPI MessageBoxA(HWND,const char *,const char *,UINT);
 IMPORT int WINAPI GetWindowTextA(HWND,char *,int);
 IMPORT BOOL WINAPI SetWindowTextA(HWND,const char *);
+IMPORT LRESULT WINAPI SendMessageA(HWND,UINT,WPARAM,LPARAM);
+IMPORT BOOL WINAPI SetCursorPos(int,int);
+IMPORT void WINAPI mouse_event(DWORD,DWORD,DWORD,DWORD,void *);
+IMPORT short WINAPI VkKeyScanA(char);
+IMPORT void WINAPI keybd_event(BYTE,BYTE,DWORD,void *);
+IMPORT HWND WINAPI GetForegroundWindow(void);
 IMPORT void *WINAPI GetDC(HWND);
 IMPORT int WINAPI ReleaseDC(HWND,void *);
 IMPORT int WINAPI GetSystemMetrics(int);
@@ -160,11 +187,180 @@ IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
 #define SRCCOPY 0x00CC0020
 #define DIB_RGB_COLORS 0
 
-static HINSTANCE g_instance; static HWND g_host, g_status;
+static HINSTANCE g_instance; static HWND g_host, g_status, g_wifi_list, g_wifi_password;
+static WLAN_HANDLE g_wlan_handle;
+static WLAN_GUID g_wifi_guid;
+static WLAN_DOT11_SSID g_wifi_ssids[32];
+static WLAN_DWORD g_wifi_auth[32], g_wifi_cipher[32];
+static int g_wifi_security[32];
+static int g_wifi_count;
+static char g_remote_token[65], g_remote_allowed_ip[16];
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
 static void update_status(const char *s){ SetWindowTextA(g_status,s); }
 static HWND add(const char *kind,const char *text,DWORD style,int x,int y,int w,int h,HWND parent,int id){
  return CreateWindowExA(0,kind,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,parent,(void*)id,g_instance,NULL);
+}
+typedef struct {
+ PFN_WlanOpenHandle open;
+ PFN_WlanEnumInterfaces interfaces;
+ PFN_WlanScan scan;
+ PFN_WlanGetAvailableNetworkList networks;
+ PFN_WlanSetProfile set_profile;
+ PFN_WlanConnect connect;
+ PFN_WlanFreeMemory free_memory;
+ PFN_WlanCloseHandle close_handle;
+} WLAN_API;
+static HINSTANCE g_wlan_module;
+static WLAN_API g_wlan_api;
+static void *wlan_proc(const char *name){ return GetProcAddress(g_wlan_module,name); }
+static int wlan_load(void){
+ if(g_wlan_module) return 1;
+ g_wlan_module=LoadLibraryA("wlanapi.dll");
+ if(!g_wlan_module) return 0;
+ g_wlan_api.open=(PFN_WlanOpenHandle)wlan_proc("WlanOpenHandle");
+ g_wlan_api.interfaces=(PFN_WlanEnumInterfaces)wlan_proc("WlanEnumInterfaces");
+ g_wlan_api.scan=(PFN_WlanScan)wlan_proc("WlanScan");
+ g_wlan_api.networks=(PFN_WlanGetAvailableNetworkList)wlan_proc("WlanGetAvailableNetworkList");
+ g_wlan_api.set_profile=(PFN_WlanSetProfile)wlan_proc("WlanSetProfile");
+ g_wlan_api.connect=(PFN_WlanConnect)wlan_proc("WlanConnect");
+ g_wlan_api.free_memory=(PFN_WlanFreeMemory)wlan_proc("WlanFreeMemory");
+ g_wlan_api.close_handle=(PFN_WlanCloseHandle)wlan_proc("WlanCloseHandle");
+ if(!g_wlan_api.open || !g_wlan_api.interfaces || !g_wlan_api.scan ||
+    !g_wlan_api.networks || !g_wlan_api.set_profile || !g_wlan_api.connect ||
+    !g_wlan_api.free_memory || !g_wlan_api.close_handle){
+  FreeLibrary(g_wlan_module); g_wlan_module=NULL; return 0;
+ }
+ return 1;
+}
+static void append_number(char *out,int *pos,unsigned int value){
+ char rev[10]; int n=0;
+ do { rev[n++]=(char)('0'+value%10); value/=10; } while(value && n<10);
+ while(n>0) out[(*pos)++]=rev[--n];
+}
+static void scan_wifi(void){
+ WLAN_HANDLE client=NULL; WLAN_DWORD version=0, rc; WLAN_INTERFACE_INFO_LIST *iflist=NULL;
+ WLAN_AVAILABLE_NETWORK_LIST *netlist=NULL; WLAN_GUID selected; int have_interface=0;
+ int i; char label[96];
+ g_wifi_count=0;
+ SendMessageA(g_wifi_list,CB_RESETCONTENT,0,0);
+ if(!wlan_load()){ update_status("Wi-Fi API unavailable. Install the XP Wireless LAN API package."); return; }
+ rc=g_wlan_api.open(HERMESXP_WLAN_API_MIN_VERSION,NULL,&version,&client);
+ if(rc!=0){ update_status("Wi-Fi service unavailable or API could not open."); return; }
+ rc=g_wlan_api.interfaces(client,NULL,&iflist);
+ if(rc!=0 || !iflist || iflist->dwNumberOfItems==0){
+  if(iflist) g_wlan_api.free_memory(iflist);
+  g_wlan_api.close_handle(client,NULL);
+  update_status("No wireless interface managed by Windows Wireless Zero Configuration."); return;
+ }
+ for(i=0;i<(int)iflist->dwNumberOfItems && i<16;i++){
+  WLAN_INTERFACE_INFO *info=(WLAN_INTERFACE_INFO*)((BYTE*)iflist+8+i*sizeof(WLAN_INTERFACE_INFO));
+  if(info->isState!=wlan_interface_state_not_ready){ selected=info->InterfaceGuid; have_interface=1; break; }
+ }
+ g_wlan_api.free_memory(iflist);
+ if(!have_interface){ g_wlan_api.close_handle(client,NULL); update_status("Wireless interface is not ready."); return; }
+ rc=g_wlan_api.scan(client,&selected,NULL,NULL,NULL);
+ if(rc!=0){ g_wlan_api.close_handle(client,NULL); update_status("Wi-Fi scan request failed."); return; }
+ /* XP SP3 returns from WlanScan before the scan is complete and provides no
+    scan-complete notification; use a bounded delay before reading results. */
+ update_status("Scanning nearby Wi-Fi networks...");
+ Sleep(4000);
+ rc=g_wlan_api.networks(client,&selected,HERMESXP_WLAN_LIST_FLAGS,NULL,&netlist);
+ if(rc!=0 || !netlist){
+  g_wlan_api.close_handle(client,NULL);
+  update_status("Could not read nearby networks. Check the adapter and WZCSVC."); return;
+ }
+ for(i=0;i<(int)netlist->dwNumberOfItems && g_wifi_count<32;i++){
+  WLAN_AVAILABLE_NETWORK *net=(WLAN_AVAILABLE_NETWORK*)((BYTE*)netlist+8+i*sizeof(WLAN_AVAILABLE_NETWORK));
+  int j, printable=1, p=0;
+  if(!net->dot11Ssid.uSSIDLength || net->dot11Ssid.uSSIDLength>32) continue;
+  g_wifi_ssids[g_wifi_count]=net->dot11Ssid;
+  g_wifi_auth[g_wifi_count]=net->dot11DefaultAuthAlgorithm;
+  g_wifi_cipher[g_wifi_count]=net->dot11DefaultCipherAlgorithm;
+  g_wifi_security[g_wifi_count]=net->bSecurityEnabled;
+  for(j=0;j<(int)net->dot11Ssid.uSSIDLength;j++){
+   BYTE c=net->dot11Ssid.ucSSID[j]; if(c<32 || c>126) printable=0;
+  }
+  if(printable){
+   for(j=0;j<(int)net->dot11Ssid.uSSIDLength && p<60;j++) label[p++]=(char)net->dot11Ssid.ucSSID[j];
+  } else {
+   const char *pre="SSID 0x"; while(*pre && p<60) label[p++]=*pre++;
+   for(j=0;j<(int)net->dot11Ssid.uSSIDLength && p<60;j++){
+    static const char hex[]="0123456789ABCDEF"; BYTE c=net->dot11Ssid.ucSSID[j];
+    label[p++]=hex[c>>4]; label[p++]=hex[c&15];
+   }
+  }
+  label[p++]=' '; label[p++]='('; append_number(label,&p,net->wlanSignalQuality); label[p++]='%'; label[p++]=')';
+  label[p++]=' '; label[p++]='[';
+  { const char *sec=net->bSecurityEnabled?"secured]":"open]"; while(*sec && p<90) label[p++]=*sec++; }
+  label[p]=0;
+  SendMessageA(g_wifi_list,CB_ADDSTRING,0,(LPARAM)label);
+  g_wifi_count++;
+ }
+ g_wlan_api.free_memory(netlist);
+ g_wlan_api.close_handle(client,NULL);
+ if(!g_wifi_count){ update_status("No visible Wi-Fi networks found."); return; }
+ g_wifi_guid=selected;
+ SendMessageA(g_wifi_list,CB_SETCURSEL,0,0);
+ update_status("Choose a Wi-Fi network. Connection/profile support is next.");
+}
+static int same_ssid(const WLAN_DOT11_SSID *a,const WLAN_DOT11_SSID *b){
+ int i; if(a->uSSIDLength!=b->uSSIDLength) return 0;
+ for(i=0;i<(int)a->uSSIDLength;i++) if(a->ucSSID[i]!=b->ucSSID[i]) return 0;
+ return 1;
+}
+static void wipe_secret(char *p,int size){ int i; for(i=0;i<size;i++)p[i]=0; }
+static void wipe_xml(WLAN_WCHAR *p,int size){ int i; for(i=0;i<size;i++)p[i]=0; }
+static void connect_wifi(HWND owner){
+ int index=(int)SendMessageA(g_wifi_list,0x0147,0,0),i,connected=0;
+ char pass[100]; WLAN_WCHAR profile[80],xml[2048]; WLAN_HANDLE client=NULL;
+ WLAN_DWORD version=0,rc,reason=0; WLAN_AVAILABLE_NETWORK_LIST *netlist=NULL;
+ WLAN_CONNECTION_PARAMETERS cp;
+ if(index<0 || index>=g_wifi_count){ update_status("Scan and select a Wi-Fi network first."); return; }
+ pass[0]=0;
+ if(g_wifi_security[index]){
+  GetWindowTextA(g_wifi_password,pass,sizeof(pass));
+  i=strlen0(pass);
+  if(i<8 || i>63){ wipe_secret(pass,sizeof(pass)); update_status("WPA/WPA2 passphrases must be 8 to 63 ASCII characters."); return; }
+  for(i=0;pass[i];i++) if((unsigned char)pass[i]<32 || (unsigned char)pass[i]>126){
+   int j; for(j=0;j<(int)sizeof(pass);j++)pass[j]=0; update_status("Use printable ASCII characters for this Wi-Fi passphrase."); return;
+  }
+  if(MessageBoxA(owner,"Windows XP stores this Wi-Fi key in its saved profile; XP WLAN profiles may not encrypt it at rest. Continue?","Wi-Fi key storage warning",MB_YESNO|MB_ICONWARNING)!=IDYES){
+   wipe_secret(pass,sizeof(pass)); update_status("Wi-Fi connection cancelled."); return;
+  }
+ }
+ if(!hermesxp_build_wifi_profile(&g_wifi_ssids[index],g_wifi_security[index],g_wifi_auth[index],g_wifi_cipher[index],pass,profile,80,xml,2048)){
+  wipe_secret(pass,sizeof(pass)); wipe_xml(xml,sizeof(xml)/sizeof(xml[0]));
+  update_status("Unsupported SSID or security mode; use printable ASCII SSIDs on open or WPA/WPA2-Personal Wi-Fi."); return;
+ }
+ SetWindowTextA(g_wifi_password,"");
+ if(!wlan_load() || g_wlan_api.open(HERMESXP_WLAN_API_MIN_VERSION,NULL,&version,&client)!=0){
+  wipe_secret(pass,sizeof(pass)); wipe_xml(xml,sizeof(xml)/sizeof(xml[0])); update_status("Wi-Fi service unavailable."); return;
+ }
+ rc=g_wlan_api.set_profile(client,&g_wifi_guid,HERMESXP_WLAN_PROFILE_FLAGS,xml,NULL,1,NULL,&reason);
+ wipe_xml(xml,sizeof(xml)/sizeof(xml[0]));
+ if(rc!=0){
+  g_wlan_api.close_handle(client,NULL); wipe_secret(pass,sizeof(pass));
+  update_status("Could not save Wi-Fi profile (check permissions and adapter compatibility)."); return;
+ }
+ cp.wlanConnectionMode=HERMESXP_WLAN_PROFILE_CONNECTION_MODE; cp.strProfile=profile;
+ cp.pDot11Ssid=NULL; cp.dot11BssType=HERMESXP_WLAN_BSS_INFRASTRUCTURE; cp.dwFlags=0;
+ rc=g_wlan_api.connect(client,&g_wifi_guid,&cp,NULL);
+ wipe_secret(pass,sizeof(pass));
+ if(rc!=0){ g_wlan_api.close_handle(client,NULL); update_status("Wi-Fi connect request failed."); return; }
+ update_status("Connecting to selected Wi-Fi network...");
+ for(i=0;i<20 && !connected;i++){
+  Sleep(1000); netlist=NULL;
+  if(g_wlan_api.networks(client,&g_wifi_guid,HERMESXP_WLAN_LIST_FLAGS,NULL,&netlist)==0 && netlist){
+   int j; for(j=0;j<(int)netlist->dwNumberOfItems;j++){
+    WLAN_AVAILABLE_NETWORK *net=(WLAN_AVAILABLE_NETWORK*)((BYTE*)netlist+8+j*sizeof(WLAN_AVAILABLE_NETWORK));
+    if((net->dwFlags&HERMESXP_WLAN_CONNECTED) && same_ssid(&net->dot11Ssid,&g_wifi_ssids[index])){ connected=1; break; }
+   }
+   g_wlan_api.free_memory(netlist);
+  }
+ }
+ g_wlan_api.close_handle(client,NULL);
+ if(connected) update_status("Connected to selected Wi-Fi network.");
+ else update_status("Connection was requested but not confirmed. Check password, signal, and adapter compatibility.");
 }
 static void probe(HWND owner){
  char host[100], response[96], machine[80], request[180]; DWORD n=sizeof(machine);
@@ -709,12 +905,10 @@ static void do_install(HWND owner){
  update_status("Install finished. See the summary.");
  MessageBoxA(owner,done,"Hermes XP install",MB_OK|MB_ICONINFORMATION);
 }
-/* --- Screenshot: capture the primary screen to C:\HermesXP\screenshot.bmp
-   (24-bit BMP, plain Win32 GDI, no image libraries), and serve it over HTTP
-   on port 18768 so Hermes can fetch it from the ZBook:
-   GET http://<xp-ip>:18768/screenshot.bmp
-   Each GET takes a fresh capture first, so the image is always current.
-   The listener runs on its own thread; the UI stays responsive. --- */
+/* --- Screenshot and remote UI listener on port 18768. All HTTP actions
+   require the 64-hex X-Hermes-Token and an IPv4 source matching
+   [Remote] AllowedHostIP. The only remote actions are inspect, bounded click,
+   printable text, allow-listed key, and authenticated BMP screenshot. --- */
 static int take_screenshot(void){
  void *hScreen, *hMem, *hBmp, *hOld; int w, h; DWORD rowSize, imgSize; BYTE *px=NULL; int ok=0;
  BITMAPINFOHEADER bmi;
@@ -770,6 +964,95 @@ static int send_all(unsigned int sock,const char *buf,int len){
  while(sent<len){ int n=send(sock,buf+sent,len-sent,0); if(n<=0) return 0; sent+=n; }
  return 1;
 }
+static int http_header_end(const char *req,int len){
+ int i; for(i=0;i<=len-4;i++) if(req[i]=='\r'&&req[i+1]=='\n'&&req[i+2]=='\r'&&req[i+3]=='\n') return i+4;
+ return 0;
+}
+static int read_http_request(unsigned int sock,char *req,int cap,int *outLen,int *bodyLen){
+ int used=0,header=0,hasLength=0,contentLength=0,expected=-1;
+ while(used<cap-1){
+  int n=recv(sock,req+used,cap-1-used,0);
+  if(n<=0) return 0;
+  used+=n; req[used]=0;
+  if(!header){
+   header=http_header_end(req,used);
+   if(header){
+    if(!hermesxp_remote_content_length(req,&contentLength,&hasLength)) return 0;
+    if((str_find(req,"POST ")==req) && !hasLength) return 0;
+    expected=header+(hasLength?contentLength:0);
+    if(expected>=cap) return 0;
+   }
+  }
+  if(header && used>=expected){
+   if(used!=expected) return 0;
+   req[used]=0; *outLen=used; *bodyLen=hasLength?contentLength:0; return 1;
+  }
+ }
+ return 0;
+}
+static void send_http_text(unsigned int sock,const char *status,const char *body){
+ char response[512]; int i=0,j=0,bodyLen=strlen0(body); const char *a="HTTP/1.0 ",*b="\r\nContent-Type: text/plain\r\nContent-Length: ",*c="\r\nConnection: close\r\n\r\n";
+ while(*a)response[i++]=*a++; while(*status)response[i++]=*status++; while(*b)response[i++]=*b++;
+ append_number(response,&i,(unsigned int)bodyLen); while(*c)response[i++]=*c++;
+ while(body[j])response[i++]=body[j++]; send_all(sock,response,i);
+}
+static int remote_peer_allowed(const SOCKADDR_IN *peer){
+ unsigned long allowed;
+ if(!peer || !remote_token_is_valid(g_remote_token) || !g_remote_allowed_ip[0]) return 0;
+ allowed=inet_addr(g_remote_allowed_ip);
+ return allowed!=0xFFFFFFFFUL && peer->sin_addr==allowed;
+}
+static int request_is(const char *req,const char *method,const char *path){
+ int i=0; while(method[i]){if(req[i]!=method[i])return 0;i++;}
+ if(req[i++]!=' ')return 0;
+ {int j=0;while(path[j]){if(req[i+j]!=path[j])return 0;j++;}return req[i+j]==' ';}
+}
+static void press_key(BYTE vk){ keybd_event(vk,0,0,NULL); keybd_event(vk,0,KEYEVENTF_KEYUP,NULL); }
+static int do_remote_ui(unsigned int sock,const char *req,int bodyLen){
+ int header=http_header_end(req,strlen0(req)); const char *body=req+header;
+ if(request_is(req,"GET","/ui/inspect")){
+  if(bodyLen!=0){send_http_text(sock,"400 Bad Request","inspect takes no body");return 1;}
+  char title[128],out[220]; int w=GetSystemMetrics(SM_CXSCREEN),h=GetSystemMetrics(SM_CYSCREEN),p=0,i=0;
+  HWND foreground=GetForegroundWindow();
+  if(foreground) GetWindowTextA(foreground,title,sizeof(title)); else title[0]=0;
+  if(!title[0]){const char *s="(untitled)";while(*s)title[i++]=*s++;title[i]=0;}
+  out[p++]='w';out[p++]='i';out[p++]='d';out[p++]='t';out[p++]='h';out[p++]='=';append_number(out,&p,(unsigned int)w);
+  out[p++]=' ';out[p++]='h';out[p++]='e';out[p++]='i';out[p++]='g';out[p++]='h';out[p++]='t';out[p++]='=';append_number(out,&p,(unsigned int)h);
+  out[p++]=' ';out[p++]='t';out[p++]='i';out[p++]='t';out[p++]='l';out[p++]='e';out[p++]='=';
+  for(i=0;title[i] && p<200;i++){unsigned char c=(unsigned char)title[i];out[p++]=(c<32||c>126)?'?':(char)c;}out[p]=0;
+  send_http_text(sock,"200 OK",out); return 1;
+ }
+ if(request_is(req,"POST","/ui/click")){
+  unsigned int x,y; int right; int w=GetSystemMetrics(SM_CXSCREEN),h=GetSystemMetrics(SM_CYSCREEN);
+  if(!hermesxp_remote_parse_click(body,bodyLen,(unsigned int)w,(unsigned int)h,&x,&y,&right)){
+   send_http_text(sock,"400 Bad Request","invalid coordinates or button");return 1;
+  }
+  if(!SetCursorPos((int)x,(int)y)){send_http_text(sock,"500 Internal Server Error","click failed");return 1;}
+  if(right){mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,NULL);mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,NULL);}
+  else {mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,NULL);mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,NULL);}
+  send_http_text(sock,"200 OK","clicked");return 1;
+ }
+ if(request_is(req,"POST","/ui/type")){
+  int i; short key; unsigned int mods;
+  if(!hermesxp_remote_text_is_safe(body,bodyLen)){send_http_text(sock,"400 Bad Request","text must be 1-128 printable ASCII characters");return 1;}
+  for(i=0;i<bodyLen;i++){key=VkKeyScanA(body[i]);mods=((unsigned short)key)>>8;if(key==-1 || (mods&6)){send_http_text(sock,"400 Bad Request","unsupported key character");return 1;}}
+  for(i=0;i<bodyLen;i++){
+   key=VkKeyScanA(body[i]);mods=((unsigned short)key)>>8;
+   if(mods&1)keybd_event(VK_SHIFT,0,0,NULL);
+   keybd_event((BYTE)(key&0xFF),0,0,NULL);keybd_event((BYTE)(key&0xFF),0,KEYEVENTF_KEYUP,NULL);
+   if(mods&1)keybd_event(VK_SHIFT,0,KEYEVENTF_KEYUP,NULL);
+  }
+  send_http_text(sock,"200 OK","typed");return 1;
+ }
+ if(request_is(req,"POST","/ui/key")){
+  char name[16]; unsigned int vk; int i;
+  if(bodyLen<1 || bodyLen>12){send_http_text(sock,"400 Bad Request","invalid key");return 1;}
+  for(i=0;i<bodyLen;i++)name[i]=body[i];name[bodyLen]=0;vk=hermesxp_remote_key_code(name);
+  if(!vk){send_http_text(sock,"400 Bad Request","key not allow-listed");return 1;}
+  press_key((BYTE)vk);send_http_text(sock,"200 OK","key sent");return 1;
+ }
+ return 0;
+}
 static DWORD WINAPI screenshot_server(void *param){
  static unsigned char wsadata[512];
  unsigned int srv, cli; SOCKADDR_IN addr;
@@ -782,13 +1065,16 @@ static DWORD WINAPI screenshot_server(void *param){
  if(bind(srv,&addr,sizeof(addr))!=0){ closesocket(srv); WSACleanup(); return 1; }
  if(listen(srv,5)!=0){ closesocket(srv); WSACleanup(); return 1; }
  for(;;){
-  char req[1024]; int n; SOCKADDR_IN caddr; int clen=sizeof(caddr);
+  char req[1024]; int n,bodyLen; SOCKADDR_IN caddr; int clen=sizeof(caddr); DWORD timeout=3000;
   cli=accept(srv,&caddr,&clen);
   if(cli==INVALID_SOCKET) continue;
-  n=recv(cli,req,sizeof(req)-1,0);
-  if(n>0){
-   req[n]=0;
-   if(str_find(req,"GET /screenshot.bmp")==req){
+  setsockopt(cli,SOL_SOCKET,SO_RCVTIMEO,(const char*)&timeout,sizeof(timeout));
+  if(read_http_request(cli,req,sizeof(req),&n,&bodyLen)){
+   if(!remote_peer_allowed(&caddr) || !hermesxp_remote_authorized(req,g_remote_token)){
+    send_http_text(cli,"401 Unauthorized","authentication failed");
+   } else if(request_is(req,"GET","/screenshot.bmp")){
+    if(bodyLen!=0){send_http_text(cli,"400 Bad Request","screenshot takes no body");}
+    else {
     take_screenshot();
     { HANDLE f=CreateFileA("C:\\HermesXP\\screenshot.bmp",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,0,NULL);
       if(f!=(HANDLE)-1){
@@ -817,9 +1103,9 @@ static DWORD WINAPI screenshot_server(void *param){
        const char *nf="HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
        send_all(cli,nf,strlen0(nf));
       } }
-   } else {
-    const char *nf="HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-    send_all(cli,nf,strlen0(nf));
+    }
+   } else if(!do_remote_ui(cli,req,bodyLen)){
+    send_http_text(cli,"404 Not Found","unknown endpoint");
    }
   }
   closesocket(cli);
@@ -847,9 +1133,16 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
    ownerLine[j]=0;
    add("STATIC",ownerLine,0,246,122,144,20,h,108);
   }
-  g_status=add("STATIC","Ready. Test only: no remote commands enabled.",0,18,152,383,24,h,104);
-  add("STATIC","Install places the CA, Switcher files and settings for Messenger.",0,18,184,386,24,h,105);
-  add("STATIC","Windows XP SP3  |  32-bit  |  HermesXP prototype",0,18,214,386,22,h,106);
+  add("STATIC","Wi-Fi networks:",0,18,154,210,20,h,110);
+  add("BUTTON","Scan Wi-Fi",WS_TABSTOP,246,150,144,26,h,111);
+  g_wifi_list=add("COMBOBOX","",CBS_DROPDOWNLIST|WS_TABSTOP,18,180,372,90,h,112);
+  add("STATIC","Wi-Fi passphrase (saved in XP profile):",0,18,211,250,20,h,113);
+  g_wifi_password=add("EDIT","",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL|ES_PASSWORD,18,234,240,25,h,114);
+  add("BUTTON","Connect Wi-Fi",WS_TABSTOP|BS_DEFPUSHBUTTON,270,234,120,26,h,115);
+  g_status=add("STATIC","Ready. Test only: remote controls are disabled.",0,18,270,383,24,h,104);
+  if(!g_remote_token[0] || !g_remote_allowed_ip[0]) update_status("Remote UI locked; configure [Remote] Token and AllowedHostIP.");
+  add("STATIC","Install places the CA, Switcher files and settings for Messenger.",0,18,302,386,24,h,105);
+  add("STATIC","Windows XP SP3  |  32-bit  |  HermesXP prototype",0,18,332,386,22,h,106);
   return 0;
  }
  if(msg==WM_COMMAND && (w&0xFFFF)==103){probe(h);return 0;}
@@ -859,25 +1152,35 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
   else update_status("Screenshot failed.");
   return 0;
  }
+ if(msg==WM_COMMAND && (w&0xFFFF)==111){scan_wifi();return 0;}
+ if(msg==WM_COMMAND && (w&0xFFFF)==115){connect_wifi(h);return 0;}
  if(msg==WM_CLOSE){DestroyWindow(h);return 0;}
  if(msg==WM_DESTROY){PostQuitMessage(0);return 0;}
  return DefWindowProcA(h,msg,w,l);
 }
+static void load_remote_config(void){
+ char dir[512],ini[512]; exe_dir(dir,sizeof(dir)); join_path(ini,dir,"hermesxp.ini");
+ GetPrivateProfileStringA("Remote","Token","",g_remote_token,sizeof(g_remote_token),ini);
+ GetPrivateProfileStringA("Remote","AllowedHostIP","",g_remote_allowed_ip,sizeof(g_remote_allowed_ip),ini);
+ if(!remote_token_is_valid(g_remote_token))g_remote_token[0]=0;
+ if(!g_remote_allowed_ip[0] || inet_addr(g_remote_allowed_ip)==0xFFFFFFFFUL)g_remote_allowed_ip[0]=0;
+}
 void WINAPI WinMainCRTStartup(void){
  WNDCLASSA c; MSG msg; HWND h; DWORD tid=0;
+ g_instance=GetModuleHandleA(NULL);
+ load_remote_config();
  /* Command-line trigger: "HermesXP.exe /screenshot" captures the screen
     and exits without opening the window. */
  { const char *cl=GetCommandLineA();
    if(cl && str_find(cl,"/screenshot")){ take_screenshot(); ExitProcess(0); } }
- /* Background HTTP listener so Hermes can fetch the latest screenshot:
-    GET http://<xp-ip>:18768/screenshot.bmp (fresh capture on each GET). */
+ /* Background authenticated screenshot and narrow UI-action listener. */
  CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
  /* Start the interactive XP GUI while the screenshot listener runs in background. */
  c.style=0; c.lpfnWndProc=window_proc; c.cbClsExtra=0; c.cbWndExtra=0;
  c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
  c.lpszMenuName=NULL; c.lpszClassName="HermesXPMainWindow";
  if(!RegisterClassA(&c))ExitProcess(2);
- h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,300,NULL,NULL,g_instance,NULL);
+ h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,410,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
  ShowWindow(h,5);UpdateWindow(h);
  while(GetMessageA(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageA(&msg);}

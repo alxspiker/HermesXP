@@ -13,6 +13,7 @@ EXPORTS
  _MessageBoxA@16=MessageBoxA
  _GetWindowTextA@12=GetWindowTextA
  _SetWindowTextA@8=SetWindowTextA
+ _SendMessageA@16=SendMessageA
  _FindWindowA@8=FindWindowA
  _SetForegroundWindow@4=SetForegroundWindow
  _GetWindowThreadProcessId@8=GetWindowThreadProcessId
@@ -25,3 +26,7 @@ EXPORTS
  _GetDC@4=GetDC
  _ReleaseDC@8=ReleaseDC
  _GetSystemMetrics@4=GetSystemMetrics
+ _SetCursorPos@8=SetCursorPos
+ _mouse_event@20=mouse_event
+ _VkKeyScanA@4=VkKeyScanA
+ _GetForegroundWindow@0=GetForegroundWindow

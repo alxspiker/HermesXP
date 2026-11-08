@@ -57,10 +57,15 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
         self.adapter=self.m.MSNPlatformAdapter(self.m.PlatformConfig({
             'token':'S'*48, 'owner_email':'me@example.invalid',
         }))
+        # The adapter health-checks the local MSN server (127.0.0.1:1863)
+        # before connecting; the test stands in a dummy listener for it.
+        self._msn_server = await asyncio.start_server(lambda r, w: None, '127.0.0.1', 1863)
         self.assertTrue(await self.adapter.connect())
 
     async def asyncTearDown(self):
         await self.adapter.disconnect()
+        self._msn_server.close()
+        await self._msn_server.wait_closed()
         os.environ.pop('HERMES_XP_PROBE_BIND',None)
 
     async def test_probe(self):

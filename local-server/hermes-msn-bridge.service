@@ -1,0 +1,15 @@
+[Unit]
+Description=Hermes MSN bridge (Node) for HermesXP local server
+After=network-online.target msn-server.service
+Wants=network-online.target msn-server.service
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.hermes/msn-bridge
+EnvironmentFile=__HOME__/.hermes/msn-bridge.env
+ExecStart=__NODE_BIN__ bridge.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

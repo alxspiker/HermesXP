@@ -1,0 +1,13 @@
+[Unit]
+Description=HermesXP local MSN TLS terminator (stunnel, :443 -> 127.0.0.1:8081)
+After=network-online.target msn-server.service
+Wants=network-online.target msn-server.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/stunnel __HOME__/.hermes/msn-server/stunnel.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

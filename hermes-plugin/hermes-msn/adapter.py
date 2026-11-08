@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import socket
 import uuid
 
 from gateway.platforms.base import BasePlatformAdapter, SendResult
@@ -42,6 +43,19 @@ class MSNPlatformAdapter(BasePlatformAdapter):
         if len(self.secret) < 32 or not self.owner or "@" not in self.owner:
             log.error("MSN bridge secret must be >=32 chars and owner address must be configured")
             return False
+        # Local MSN server health check: the bridge talks to the server named
+        # by MSN_SERVER_HOST (installer default 127.0.0.1). When that is a
+        # local address, verify the NS port answers before binding the bridge
+        # port, so a down server is a clear log line, not a silent
+        # no-message state. An external host (Escargot mode) skips the probe.
+        msn_host = (os.environ.get("MSN_SERVER_HOST", "127.0.0.1") or "127.0.0.1").strip()
+        if msn_host in ("127.0.0.1", "localhost", "::1"):
+            try:
+                with socket.create_connection((msn_host, 1863), timeout=2):
+                    pass
+            except OSError:
+                log.error("Local MSN server is not reachable on %s:1863 — start the msn-server service (local-server/install.sh) before enabling this platform", msn_host)
+                return False
         self.bridge_server = await asyncio.start_server(self._on_bridge, "127.0.0.1", BRIDGE_PORT, limit=16384)
         probe_host = os.environ.get("HERMES_XP_PROBE_BIND", "").strip()
         if probe_host:

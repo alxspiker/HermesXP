@@ -1,6 +1,6 @@
 # Hermes XP / MSN Messenger Bridge — prototype v0.1
 
-**Status: development prototype.** A native Windows XP x86 companion and Hermes gateway platform adapter have been built; the Escargot/MSN login path requires your own accounts and has **not** been tested end-to-end. Do not call this a working self-hosted MSN server.
+**Status: local server build in progress.** The XP probe (Step A) passed and the Hermes plugin (Step B) is installed. The local MSN server (Step C) is now built in: `local-server/install.sh` installs Escargot's open server code on the Hermes host, so **no Escargot website signup is needed** — WLM on the XP talks to a server running on the ZBook, and the Hermes bot logs in to the same server. The XP sign-in test (TLS 1.0 + local CA) is the remaining unverified step.
 
 The XP companion is **not an agent runtime or remote execution service**. It is a read-only TCP connectivity probe. The modern host has a Hermes platform adapter and a separate Node.js bridge for an experimental MSN bot library.
 
@@ -11,6 +11,8 @@ The XP companion is **not an agent runtime or remote execution service**. It is 
 | `dist/HermesXP.exe` | Windows XP SP3 x86 | Win32 graphical probe, no external DLLs / CRT / WMI |
 | `hermes-plugin/hermes-msn/plugin.yaml` + `adapter.py` | Hermes host, Python | Registers platform `hermes_msn`; handles inbound/outbound messages |
 | `msn-bridge/bridge.js` | Hermes host, Node 18+ | Connects MSN bot to Hermes via authenticated localhost JSON-lines |
+| `msn-bridge/msnclient/` | Hermes host, Node | Patched copy of tutmonde/msnclient (GPLv3) — server host/login URL come from env, see `LOCAL-PATCH.md` |
+| `local-server/install.sh` | Hermes host (ZBook), bash | One-time installer: downloads msn-server, creates accounts, starts services, sets up TLS |
 | `tools/probe_server.py` | Hermes host, Python | Optional stand-alone probe test *without* Hermes |
 | `xp-client/*` | Build machine | C source, import definitions, clang/lld build script |
 | `tests/` | Build machine | Simulated adapter loopback protocol tests |
@@ -18,20 +20,22 @@ The XP companion is **not an agent runtime or remote execution service**. It is 
 ## Architecture
 
 ```text
-Original MSN Messenger on XP  ---> Escargot revival service
-                                           |
-                                    MSN bot account
-                                           |
-                              msn-bridge/bridge.js (Node)
-                                           | loopback 127.0.0.1:18764 + secret
-                                 Hermes MSN platform plugin
-                                           |
-                                    Hermes gateway / agent
+WLM 2009 on XP  ---> local MSN server on the ZBook (msn-server, :1863/:1864)
+  (Switcher patch   + stunnel TLS terminator on :443 for the HTTPS sign-in)
+  redirects
+  login.live.com     |
+  to 192.168.1.81    |  MSN bot account (hermes-bot@hermes.local)
+                     |       |
+                     |  msn-bridge/bridge.js (Node)
+                     |       | loopback 127.0.0.1:18764 + secret
+                     |  Hermes MSN platform plugin
+                     |       |
+                     |  Hermes gateway / agent
 
 HermesXP.exe on XP --> LAN port 18765 --> read-only host probe
 ```
 
-**There is no custom MSNP server in this release.** MSN Messenger must be patched/configured for the Escargot network, and the Hermes bot requires its own Escargot login. This plugin does not automatically rewrite the original client or store Hermes LLM API keys on XP.
+**There is no Escargot account in this setup.** The MSN server is Escargot's open server code (valtron/msn-server, CC BY-NC 4.0), downloaded by the installer at setup time and run locally on the ZBook. It is not vendored in this repo (license). This plugin does not automatically rewrite the original client or store Hermes LLM API keys on XP — the Switcher patch and CA install on the XP are the two manual steps (Step C).
 
 ## Step A: test the XP executable independently
 
@@ -46,14 +50,14 @@ If it fails, check host IP, Windows/host firewall, routing, and that port 18765 
 
 1. Copy `hermes-plugin/hermes-msn` to `~/.hermes/plugins/hermes-msn` on the **Hermes host**, not on XP.
 2. Generate a secret locally on the host: `python3 -c 'import secrets; print(secrets.token_hex(32))'`
-3. Set the following in your Hermes **profile's** `.env` (or service environment). The same token must be supplied to the Node bridge; keep it secret:
+3. Set the following in your Hermes **profile's** `.env` (or service environment). The same token must be supplied to the Node bridge; keep it secret. The owner/bot accounts are created by the Step C installer as `alx@hermes.local` / `hermes-bot@hermes.local`:
 
    ```ini
    HERMES_MSN_BRIDGE_TOKEN=<the_generated_secret>
-   HERMES_MSN_OWNER_EMAIL=<your_escargot_email>
-   HERMES_MSN_ALLOWED_USERS=<your_escargot_email>
+   HERMES_MSN_OWNER_EMAIL=alx@hermes.local
+   HERMES_MSN_ALLOWED_USERS=alx@hermes.local
    # Optional: your HOST's private LAN IP to enable the read-only XP probe
-   HERMES_XP_PROBE_BIND=192.168.1.20
+   HERMES_XP_PROBE_BIND=192.168.1.81
    ```
 
 4. Enable the plugin: `hermes plugins enable hermes-msn`. Enable the platform in Hermes gateway configuration if it isn't enabled automatically:
@@ -68,29 +72,31 @@ If it fails, check host IP, Windows/host firewall, routing, and that port 18765 
    Merge this into your *existing* YAML; do not overwrite it. Depending on Hermes version/profile, the platform setup menu may be preferable. Restart your Hermes gateway.
 5. The adapter binds only `127.0.0.1:18764` for the MSN bot. Optional XP probe is on explicitly configured `HERMES_XP_PROBE_BIND:18765`.
 
-## Step C: make MSN Messenger reach Hermes
+## Step C: local MSN server (no Escargot signup)
 
-**Requires Escargot accounts.** See https://escargot.chat/connect/guides/ to patch an original MSN Messenger client and troubleshoot XP TLS/login issues. The specific steps depend on which MSN version Ruiter has (Help → About). These steps are *not* performed by HermesXP.exe.
+Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent — safe to re-run.
 
-1. Create two Escargot accounts: one for the original MSN Messenger client on Ruiter, another for the Hermes bot.
-2. Patch/configure the original Messenger for Escargot using their instructions; do not get a random modified EXE from an untrusted source.
-3. On the **modern host**, from `msn-bridge/`, install the experimental library:
+1. One-time system prerequisites (as a sudo user on the host):
    ```sh
-   git clone https://github.com/tutmonde/msnclient msnclient
-   cd msnclient && npm install && cd ..
+   sudo apt-get install -y stunnel4
+   echo 'net.ipv4.ip_unprivileged_port_start=0' | sudo tee /etc/sysctl.d/99-hermesxp.conf
+   sudo sysctl -p /etc/sysctl.d/99-hermesxp.conf
    ```
-   That library is GPLv3 and explicitly marked under development. It is **not bundled** in this archive; its old dependencies may need security review and updates.
-4. Export environment variables to the modern Node process (do not put secrets in source code):
+   The sysctl lets a user service bind :443 (the TLS terminator). Without it the installer still finishes the server + bridge and warns.
+2. Run the installer from this repo:
    ```sh
-   export MSN_BOT_EMAIL='bot_account@example.com'
-   export MSN_BOT_PASSWORD='bot_password'
-   export HERMES_MSN_BRIDGE_TOKEN='same_secret_as_gateway'
-   export HERMES_MSN_OWNER_EMAIL='your_account@example.com'
-   node bridge.js
+   cd local-server && ./install.sh
    ```
-5. Sign in to the original Messenger on XP, add the bot's email to your contact list, and send it a message. Only the configured owner address is allowed through the bridge into Hermes. The Hermes gateway itself must be running.
+   It clones Escargot's server code pinned to commit `9cddb9c` into `~/.hermes/msn-server` (downloaded at install time, not vendored — CC BY-NC 4.0), creates a venv + dependencies, writes `settings_local.py` (all redirects to the ZBook LAN IP), creates the SQLite databases, creates the two accounts (`alx@hermes.local` owner, `hermes-bot@hermes.local` bot), writes their credentials into `~/.hermes/.env`, and starts three systemd user services: `msn-server` (:1863/:1864/:8081), `msn-tls` (stunnel :443 → 8081, TLS 1.0 + old ciphers for XP), `hermes-msn-bridge` (Node bridge → 127.0.0.1:18764).
+3. **The installer prints the owner password ONCE** (`OWNER_PASSWORD_FOR_WLM=...`). Give it to the person who will type it into WLM on the XP. It is never written to a file.
+4. Restart the Hermes gateway so the `hermes_msn` platform connects (the adapter health-checks 127.0.0.1:1863 and logs a clear error if the server is down).
+5. On the XP (manual — cannot be done over SSH):
+   - Install Escargot's Switcher: import `escargot.dll` into both `C:\Program Files\Windows Live\Messenger\msnmsgr.exe` and `wlcomm.exe` with a PE editor (Stud_PE is what upstream recommends), and place `msnmsgr.exe-escargot.ini` / `wlcomm.exe-escargot.ini` (in `local-server/`) next to each exe. They already point at `192.168.1.81`.
+   - Install the local CA root: copy `~/.hermes/msn-server/certs/ca.pem` to the XP and double-click it → install into Trusted Root Certification Authorities.
+   - Sign in to WLM as `alx@hermes.local` with the printed password, add `hermes-bot@hermes.local` to your contacts, and send it a message. Only the configured owner address is allowed through the bridge into Hermes. The Hermes gateway itself must be running.
+6. Verify: `systemctl --user status msn-server.service msn-tls.service hermes-msn-bridge.service`, and check the gateway log shows the platform connected and the bridge logged in.
 
-**Not verified:** Escargot login, add-contact handshake, MSN version compatibility and actual message round-trip with the old XP client. They require a live test and valid test accounts. An outdated MSNP9 bot library might need fixes if the revival service has changed. We do not claim those steps already work.
+**Not verified yet:** the XP HTTPS sign-in against the local TLS terminator (the R1 gate — whether WLM 2009's SChannel accepts the local CA cert and TLS 1.0 + 3DES from Debian 13's OpenSSL). If sign-in fails on TLS, stop and investigate the Switcher/cert behaviour before building more code around it.
 
 ## Security boundaries / known limitations
 

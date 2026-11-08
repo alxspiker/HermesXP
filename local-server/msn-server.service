@@ -1,0 +1,14 @@
+[Unit]
+Description=Local MSN server (Escargot msn-server) for HermesXP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__HOME__/.hermes/msn-server
+ExecStart=__HOME__/.hermes/msn-server/.venv/bin/python run_all.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

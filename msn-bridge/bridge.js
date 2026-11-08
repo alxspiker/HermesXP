@@ -1,6 +1,9 @@
 'use strict';
 // Hermes MSN bot adapter. Runs on the MODERN Hermes computer; never on Windows XP.
 // Requires the experimental tutmonde/msnclient library in ./msnclient (GPLv3).
+// Local-server mode: ./msnclient reads MSN_SERVER_HOST / MSN_LOGIN_URL from
+// the environment (defaults are Escargot). The installer sets them to the
+// local server (127.0.0.1 / http://127.0.0.1:8081/login).
 const net = require('net');
 const path = require('path');
 const readline = require('readline');

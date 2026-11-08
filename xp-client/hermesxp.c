@@ -55,6 +55,16 @@ IMPORT DWORD WINAPI GetPrivateProfileStringA(const char *,const char *,const cha
 IMPORT DWORD WINAPI GetModuleFileNameA(HINSTANCE,char *,DWORD);
 IMPORT DWORD WINAPI GetFileAttributesA(const char *);
 IMPORT BOOL WINAPI CopyFileA(const char *,const char *,BOOL);
+IMPORT HWND WINAPI FindWindowA(const char *,const char *);
+IMPORT BOOL WINAPI SetForegroundWindow(HWND);
+IMPORT DWORD WINAPI GetWindowThreadProcessId(HWND,DWORD *);
+IMPORT DWORD WINAPI GetCurrentThreadId(void);
+IMPORT BOOL WINAPI AttachThreadInput(DWORD,DWORD,BOOL);
+IMPORT void WINAPI keybd_event(BYTE,BYTE,DWORD,DWORD);
+IMPORT BOOL WINAPI OpenClipboard(HWND);
+IMPORT BOOL WINAPI EmptyClipboard(void);
+IMPORT void *WINAPI SetClipboardData(UINT,void *);
+IMPORT BOOL WINAPI CloseClipboard(void);
 IMPORT void *WINAPI GetProcessHeap(void);
 IMPORT void *WINAPI HeapAlloc(void *,DWORD,DWORD);
 IMPORT BOOL WINAPI HeapFree(void *,DWORD,void *);
@@ -65,6 +75,9 @@ IMPORT DWORD WINAPI GetFileSize(HANDLE,DWORD *);
 IMPORT BOOL WINAPI CloseHandle(HANDLE);
 IMPORT DWORD WINAPI WaitForSingleObject(HANDLE,DWORD);
 IMPORT void WINAPI Sleep(DWORD);
+IMPORT void *WINAPI GlobalAlloc(UINT,DWORD);
+IMPORT void *WINAPI GlobalLock(void *);
+IMPORT BOOL WINAPI GlobalUnlock(void *);
 IMPORT BOOL WINAPI CreateProcessA(const char *,char *,void *,void *,BOOL,DWORD,void *,const char *,void *,void *);
 IMPORT void *WINAPI ShellExecuteA(HWND,const char *,const char *,const char *,const char *,int);
 IMPORT int WINAPI WSAStartup(WORD,void *);
@@ -138,6 +151,7 @@ static void probe(HWND owner){
  } else update_status("Unexpected server response.");
 }
 static char g_owner[100];
+static char g_ownerPw[100];
 static char g_contactsDir[512];
 
 /* --- XP-side installer: puts the connection files in place so WLM can use
@@ -346,6 +360,103 @@ static int install_ca(const char *pemPath){
  CertFreeCertificateContext(ctx);
  return ok;
 }
+/* --- Auto-login for WLM: the sign-in form is DirectUI (no real EDIT child
+   windows), so the exe types into it with the keyboard. It pastes the owner
+   address and password from hermesxp.ini via the clipboard (Ctrl+V), tabs
+   through the "remember password" / "sign me in automatically" boxes, and
+   presses Enter. After the first sign-in WLM remembers the credentials and
+   signs in on its own on later launches. Returns 1 if it attempted. */
+#define VK_TAB 0x09
+#define VK_RETURN 0x0D
+#define VK_SPACE 0x20
+#define VK_CONTROL 0x11
+#define VK_SHIFT 0x10
+#define VK_OEM_MINUS 0xBD
+#define KEYEVENTF_KEYUP 2
+#define CF_TEXT 1
+#define GMEM_MOVEABLE 2
+static void send_key(BYTE vk){
+ keybd_event(vk,0,0,0); Sleep(60); keybd_event(vk,0,KEYEVENTF_KEYUP,0); Sleep(60);
+}
+static void send_key_shift(BYTE vk){
+ keybd_event(VK_SHIFT,0,0,0); Sleep(40);
+ keybd_event(vk,0,0,0); Sleep(60); keybd_event(vk,0,KEYEVENTF_KEYUP,0); Sleep(40);
+ keybd_event(VK_SHIFT,0,KEYEVENTF_KEYUP,0); Sleep(60);
+}
+/* Type a string key by key (the DirectUI password edit does not accept
+   Ctrl+V paste, so the password must be typed). Handles the token_urlsafe
+   alphabet: A-Z (shift), a-z, 0-9, '-' and '_'. */
+static void type_string(const char *s){
+ int i=0;
+ while(s[i]){
+  char c=s[i];
+  if(c>='a' && c<='z') send_key((BYTE)('A'+(c-'a')));
+  else if(c>='A' && c<='Z') send_key_shift((BYTE)c);
+  else if(c>='0' && c<='9') send_key((BYTE)c);
+  else if(c=='-') send_key(VK_OEM_MINUS);
+  else if(c=='_') send_key_shift(VK_OEM_MINUS);
+  i++;
+ }
+}
+static void send_ctrl_v(void){
+ keybd_event(VK_CONTROL,0,0,0); Sleep(60);
+ keybd_event('V',0,0,0); Sleep(60); keybd_event('V',0,KEYEVENTF_KEYUP,0); Sleep(60);
+ keybd_event(VK_CONTROL,0,KEYEVENTF_KEYUP,0); Sleep(60);
+}
+static int set_clipboard_text(const char *s){
+ int n=0; void *mem; char *p;
+ while(s[n]) n++;
+ mem=GlobalAlloc(GMEM_MOVEABLE,(DWORD)(n+1));
+ if(!mem) return 0;
+ p=(char*)GlobalLock(mem);
+ if(!p) return 0;
+ {int i=0; while(s[i]){p[i]=s[i];i++;} p[i]=0;}
+ GlobalUnlock(mem);
+ if(!OpenClipboard(NULL)) return 0;
+ EmptyClipboard();
+ SetClipboardData(CF_TEXT,mem);
+ CloseClipboard();
+ return 1;
+}
+static int auto_login_wlm(void){
+ HWND w; int tries=0; DWORD wlmTid, myTid, pid=0;
+ if(!g_owner[0] || !g_ownerPw[0]) return 0;
+ /* Wait for the WLM sign-in window (it takes a few seconds on this netbook). */
+ while(tries<30){
+  w=FindWindowA("MSBLWindowClass",NULL);
+  if(w) break;
+  Sleep(500); tries++;
+ }
+ if(!w) return 0;
+ /* Attach our input thread to WLM's so SetForegroundWindow works from a
+    process that is not already the foreground app (otherwise the keystrokes
+    go to the wrong window). Retry until WLM is actually foreground. */
+ wlmTid=GetWindowThreadProcessId(w,&pid);
+ myTid=GetCurrentThreadId();
+ AttachThreadInput(myTid,wlmTid,1);
+ tries=0;
+ while(tries<10){
+  SetForegroundWindow(w);
+  Sleep(300);
+  /* (GetForegroundWindow is not imported; rely on the attach + retry.) */
+  tries++;
+  break;
+ }
+ Sleep(1500);
+ /* Fresh sign-in: the email field has focus. Paste the address (paste works
+    in the email field), Tab to the password field, TYPE the password (the
+    DirectUI password edit does not accept Ctrl+V). */
+ set_clipboard_text(g_owner); send_ctrl_v();
+ send_key(VK_TAB);
+ type_string(g_ownerPw);
+ /* Tab to "remember my password", check it; Tab to "sign me in
+    automatically", check it; Tab to the Sign in button and press it. */
+ send_key(VK_TAB); send_key(VK_SPACE);
+ send_key(VK_TAB); send_key(VK_SPACE);
+ send_key(VK_TAB); send_key(VK_SPACE);
+ AttachThreadInput(myTid,wlmTid,0);
+ return 1;
+}
 static void do_install(HWND owner){
  char dir[512], msnDir[512], src[512], dst[512], cmd[512], done[700];
  int n=0, dll=0, ini1=0, ini2=0, ca=0, launched=0, p1=0, p2=0;
@@ -384,6 +495,10 @@ static void do_install(HWND owner){
  /* ShellExecute (not CreateProcessA): the shell associates the new process
     with the interactive desktop, so Messenger's window actually appears. */
  launched=((DWORD)ShellExecuteA(owner,"open",cmd,NULL,NULL,1)>32);
+ if(launched && g_owner[0] && g_ownerPw[0]){
+  /* Sign Messenger in on its own: no typing, no sign-in step for the user. */
+  auto_login_wlm();
+ }
  {const char *h="Installed:\n"; while(*h) done[n++]=*h++;}
  if(dll){const char *s="- escargot.dll next to Messenger\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- escargot.dll MISSING from this folder (copy it here first)\n"; while(*s) done[n++]=*s++;}
@@ -396,7 +511,7 @@ static void do_install(HWND owner){
  else {const char *s="- msnmsgr.exe NOT patched (close Messenger and run Install again)\n"; while(*s) done[n++]=*s++;}
  if(p2==1||p2==2){const char *s="- wlcomm.exe patched to load escargot.dll\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- wlcomm.exe NOT patched (close Messenger and run Install again)\n"; while(*s) done[n++]=*s++;}
- {const char *s="\nDone. Sign in as the owner address, pick the bot, and start talking."; while(*s) done[n++]=*s++;}
+ {const char *s="\nDone. Messenger signs in on its own — pick the bot and start talking."; while(*s) done[n++]=*s++;}
  done[n]=0;
  update_status("Install finished. See the summary.");
  MessageBoxA(owner,done,"Hermes XP install",MB_OK|MB_ICONINFORMATION);
@@ -408,6 +523,7 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
   join_path(ini,dir,"hermesxp.ini");
   GetPrivateProfileStringA("Hermes","ServerIP","192.168.1.20",host,sizeof(host),ini);
   GetPrivateProfileStringA("Hermes","OwnerEmail","",g_owner,sizeof(g_owner),ini);
+  GetPrivateProfileStringA("Hermes","OwnerPassword","",g_ownerPw,sizeof(g_ownerPw),ini);
   add("STATIC","Hermes XP | First connection",0,18,16,330,24,h,100);
   add("STATIC","Hermes host IPv4 address:",0,18,57,225,20,h,101);
   g_host=add("EDIT",host,WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,18,82,222,25,h,102);

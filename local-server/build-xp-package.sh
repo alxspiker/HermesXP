@@ -38,11 +38,16 @@ if [ -z "${LAN_IP:-}" ]; then
 fi
 [ -n "$LAN_IP" ] || { echo "[xp-package] could not detect LAN IP; set LAN_IP env" >&2; exit 1; }
 
-# Owner address: from the live .env, else the generic default.
+# Owner address + password: from the live .env, else the generic default.
+# The password is in hermesxp.ini so the exe can sign Messenger in on its
+# own (auto-login, no typing). It is a local-only credential for the local
+# MSN server, and the zip is served only on the LAN.
 OWNER_EMAIL="user@hermes.local"
+OWNER_PASSWORD=""
 if [ -f "$HERMES_HOME/.env" ]; then
     OWNER_EMAIL="$(grep -E '^HERMES_MSN_OWNER_EMAIL=' "$HERMES_HOME/.env" | cut -d= -f2- | head -1)"
     [ -z "$OWNER_EMAIL" ] && OWNER_EMAIL="user@hermes.local"
+    OWNER_PASSWORD="$(grep -E '^HERMES_MSN_OWNER_PASSWORD=' "$HERMES_HOME/.env" | cut -d= -f2- | head -1)"
 fi
 log "server $LAN_IP, owner $OWNER_EMAIL"
 
@@ -52,11 +57,13 @@ bash "$SCRIPT_DIR/build-exe.sh" "$REPO_ROOT" || { echo "[xp-package] exe build f
 mkdir -p "$STAGE" "$SWITCHER_DL"
 cp "$REPO_ROOT/dist/HermesXP.exe" "$STAGE/HermesXP.exe"
 
-# 2. Connection config for the exe (read at startup; no secrets in it).
+# 2. Connection config for the exe (read at startup; holds the owner
+# password so the exe can auto-sign-in Messenger — local-only credential).
 cat > "$STAGE/hermesxp.ini" <<EOF
 [Hermes]
 ServerIP=$LAN_IP
 OwnerEmail=$OWNER_EMAIL
+OwnerPassword=$OWNER_PASSWORD
 ProbePort=18765
 EOF
 

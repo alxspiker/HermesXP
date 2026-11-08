@@ -19,3 +19,7 @@ EXPORTS
  _GetFileSize@8=GetFileSize
  _WaitForSingleObject@8=WaitForSingleObject
  _Sleep@4=Sleep
+ _GlobalAlloc@8=GlobalAlloc
+ _GlobalLock@4=GlobalLock
+ _GlobalUnlock@4=GlobalUnlock
+ _GetCurrentThreadId@0=GetCurrentThreadId

@@ -13,3 +13,12 @@ EXPORTS
  _MessageBoxA@16=MessageBoxA
  _GetWindowTextA@12=GetWindowTextA
  _SetWindowTextA@8=SetWindowTextA
+ _FindWindowA@8=FindWindowA
+ _SetForegroundWindow@4=SetForegroundWindow
+ _GetWindowThreadProcessId@8=GetWindowThreadProcessId
+ _AttachThreadInput@12=AttachThreadInput
+ _keybd_event@16=keybd_event
+ _OpenClipboard@4=OpenClipboard
+ _EmptyClipboard@0=EmptyClipboard
+ _SetClipboardData@8=SetClipboardData
+ _CloseClipboard@0=CloseClipboard

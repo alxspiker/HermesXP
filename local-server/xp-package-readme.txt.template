@@ -8,7 +8,8 @@ No internet on the XP is required: the server runs on the Hermes host
 WHAT'S INSIDE
   HermesXP.exe                 Companion app: tests the connection, and its
                                "Install for MSN" button places the files
-                               below and launches Messenger.
+                               below, installs the CA, patches Messenger to
+                               load the Switcher, and launches Messenger.
   hermesxp.ini                 Connection settings (server __LAN_IP__,
                                owner __OWNER_EMAIL__). Edit if the server
                                moves to another address.
@@ -23,14 +24,13 @@ WHAT'S INSIDE
 INSTALL (about 5 minutes)
   1. Unzip this folder anywhere on the XP (e.g. C:\HermesXP).
   2. Run HermesXP.exe and click "Install for MSN". It copies the DLL and
-     settings next to Messenger, installs the CA, and launches Messenger.
-  3. ONE MANUAL STEP (no tool can do it safely yet): import escargot.dll
-     into BOTH C:\Program Files\Windows Live\Messenger\msnmsgr.exe and
-     wlcomm.exe with a PE editor (Stud_PE is the one upstream recommends:
-     open the exe, Imports, add escargot.dll, save). Back the exes up first.
-  4. Sign in to Messenger as __OWNER_EMAIL__ with the password printed
-     when the server was set up. Add the bot (hermes-bot@hermes.local) to
-     your contacts and send it a message — Hermes answers.
+     settings next to Messenger, installs the CA, patches both Messenger
+     exes to load the Switcher at startup (originals backed up as .bak),
+     and launches Messenger. No manual steps.
+  3. Sign in to Messenger as __OWNER_EMAIL__ with the password printed
+     when the server was set up. The bot (hermes-bot@hermes.local) is
+     already in your contacts — pick it and send it a message. Hermes
+     answers.
 
 TROUBLESHOOTING
   - "Connection failed" on Test: check the server IP in hermesxp.ini, and

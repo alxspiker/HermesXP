@@ -65,4 +65,14 @@ else
     warn "could not verify size on the XP (dir output: $(echo "$OUT" | tr '\n' ' ' | head -c 200))"
     exit 1
 fi
+# Also place the new exe in the package folder the user actually runs
+# (it has the DLL/INIs/CA beside it), so no manual re-extract is needed.
+$XP_CMD "copy /Y C:\\HermesXP.exe C:\\HermesXP\\HermesXP.exe" >/dev/null
+OUT2="$($XP_CMD "dir C:\\HermesXP\\HermesXP.exe" 2>/dev/null || true)"
+if echo "$OUT2" | tr -d ',' | grep -q "$LOCAL_SIZE"; then
+    log "verified: C:\\HermesXP\\HermesXP.exe on $XP_HOST is $LOCAL_SIZE bytes"
+else
+    warn "could not verify package-folder copy on the XP (dir output: $(echo "$OUT2" | tr '\n' ' ' | head -c 200))"
+    exit 1
+fi
 log "done"

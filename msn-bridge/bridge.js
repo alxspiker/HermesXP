@@ -74,7 +74,10 @@ client.on('msg', msg => {
     backlog.push(item);
   }
 });
-client.on('close', () => console.error('MSN connection closed; restart bridge to reconnect.'));
+client.on('close', () => {
+  console.error('MSN connection closed; exiting so the supervisor can reconnect.');
+  process.exit(1);
+});
 client.on('error', err => console.error('MSN library error:', err));
 connectBridge();
 client.execute();

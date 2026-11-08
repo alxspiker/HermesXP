@@ -130,7 +130,7 @@ def main():
             user = User(
                 uuid=misc.gen_uuid(), email=bot_email,
                 username=bot_email.split("@", 1)[0],
-                verified=False, friendly_name=bot_email, groups={}, settings={},
+                verified=False, friendly_name="Hermes", groups={}, settings={},
             )
             user.password = hashmod.hasher.encode(pw)
             sess.add(user)

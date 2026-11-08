@@ -69,6 +69,10 @@ def _upsert_env(path, values):
     os.chmod(path, 0o600)
 
 
+def bridge_token(existing):
+    return existing.get("HERMES_MSN_BRIDGE_TOKEN") or secrets.token_hex(32)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--owner-email")
@@ -142,24 +146,24 @@ def main():
         print("ERROR: no bot password available", file=sys.stderr)
         sys.exit(1)
 
+    token = bridge_token(existing)
     _upsert_env(env_path, {
+        "HERMES_MSN_BRIDGE_TOKEN": token,
         "HERMES_MSN_OWNER_EMAIL": owner_email,
-        "HERMES_MSN_ALLOWED_USERS": owner_email,
+        "HERMES_MSN_ALLOWED_USERS": existing.get("HERMES_MSN_ALLOWED_USERS") or owner_email,
         "MSN_BOT_EMAIL": bot_email,
         "MSN_BOT_PASSWORD": bot_pw,
         "MSN_SERVER_HOST": "127.0.0.1",
         "MSN_LOGIN_URL": "http://127.0.0.1:8081/login",
     })
-    bridge_token = existing.get("HERMES_MSN_BRIDGE_TOKEN", "")
     bridge_values = {
+        "HERMES_MSN_BRIDGE_TOKEN": token,
         "MSN_BOT_EMAIL": bot_email,
         "MSN_BOT_PASSWORD": bot_pw,
         "HERMES_MSN_OWNER_EMAIL": owner_email,
         "MSN_SERVER_HOST": "127.0.0.1",
         "MSN_LOGIN_URL": "http://127.0.0.1:8081/login",
     }
-    if bridge_token:
-        bridge_values["HERMES_MSN_BRIDGE_TOKEN"] = bridge_token
     _upsert_env(bridge_env_path, bridge_values)
 
     if owner_pw:

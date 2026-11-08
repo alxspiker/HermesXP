@@ -158,8 +158,14 @@ log "hermes-msn-bridge service started"
 # is built from the live server state, so it never contains stale addresses.
 sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/hermes-xp-package.service" > "$HOME/.config/systemd/user/hermes-xp-package.service"
 systemctl --user daemon-reload
-systemctl --user enable --now hermes-xp-package.service || warn "could not start the package host service"
-bash "$SCRIPT_DIR/build-xp-package.sh" "$SCRIPT_DIR/.." || warn "XP package build failed (the server still works; re-run build-xp-package.sh to retry)"
+# Stop any old host before rebuilding: it may serve a legacy archive with secrets.
+# Refuse to proceed if it cannot be stopped.
+systemctl --user disable --now hermes-xp-package.service || { warn "could not disable and stop the package host service"; exit 1; }
+if bash "$SCRIPT_DIR/build-xp-package.sh" "$SCRIPT_DIR/.."; then
+    systemctl --user enable --now hermes-xp-package.service || warn "could not start the package host service"
+else
+    warn "XP package build failed; package host remains stopped (re-run install.sh to retry)"
+fi
 
 log "done. Check: systemctl --user status msn-server.service hermes-msn-bridge.service msn-tls.service"
 log "Next: restart the Hermes gateway so the hermes_msn platform connects, then test WLM sign-in on the XP."

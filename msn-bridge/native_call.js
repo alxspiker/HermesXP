@@ -15,6 +15,7 @@ const dgram = require('dgram');
 const crypto = require('crypto');
 const http = require('http');
 const net = require('net');
+const {performance} = require('perf_hooks');
 
 const DEFAULT_PORT = 19740;
 const MAX_CALL_MS = 30 * 60 * 1000;
@@ -25,6 +26,9 @@ const MIN_TALK_MS = 180;
 const MAX_TALK_MS = 9000;
 const PRE_ROLL_MS = 180;
 const AUDIO_WORKER_PORT = 18771;
+const RTP_PACKET_MS = 20;
+const RTP_SAMPLES_PER_PACKET = 160;
+const RTP_PREROLL_PACKETS = 4;
 
 function parseSip(data) {
   if (!Buffer.isBuffer(data) || data.length > 16384 || !data.length) return null;
@@ -143,9 +147,9 @@ function resamplePcm8To16(ulaw) {
   }
   return result;
 }
-function encodeRtp(payload, seq, stamp, ssrc) {
+function encodeRtp(payload, seq, stamp, ssrc, marker = false) {
   const frame = Buffer.alloc(12 + payload.length);
-  frame[0] = 0x80; frame[1] = 0;
+  frame[0] = 0x80; frame[1] = marker ? 0x80 : 0;
   frame.writeUInt16BE(seq & 0xffff, 2);
   frame.writeUInt32BE(stamp >>> 0, 4);
   frame.writeUInt32BE(ssrc >>> 0, 8);
@@ -539,19 +543,51 @@ class NativeCall {
       this.logger.info('Hermes voice response sent via native Messenger RTP');
   }
   async playPcm16(call, pcm) {
-    // Speech worker outputs 16kHz PCM16; 2:1 downsample to 8kHz for PCMU.
+    // Pre-encode every G.711 frame before streaming. Average pairs of
+    // 16kHz samples when decimating to 8kHz to reduce aliasing.
+    if (!Buffer.isBuffer(pcm) || pcm.length % 2)
+      throw new Error('Invalid PCM16 playback');
+    const frames = [];
+    for (let offset = 0; offset + 640 <= pcm.length; offset += 640) {
+      const chunk = Buffer.alloc(RTP_SAMPLES_PER_PACKET);
+      for (let i = 0; i < RTP_SAMPLES_PER_PACKET; i++) {
+        const a = pcm.readInt16LE(offset + i * 4);
+        const b = pcm.readInt16LE(offset + i * 4 + 2);
+        chunk[i] = ulawEncode(Math.round((a + b) / 2));
+      }
+      frames.push(encodeRtp(chunk, call.seq++, call.stamp, call.ssrc,
+                            frames.length === 0));
+      call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
+    }
+    if (!frames.length) return;
     call.playing = true;
     try {
-      for (let offset = 0; offset + 640 <= pcm.length; offset += 640) {
+      // Scheduling from absolute monotonic deadlines avoids the cumulative
+      // drift caused by awaiting 20ms *after* every packet. Prime the
+      // Windows Messenger jitter buffer with 80ms before steady pacing.
+      const start = performance.now();
+      let maxLate = 0;
+      let latePackets = 0;
+      for (let i = 0; i < frames.length; i++) {
         if (this.call !== call) return;
-        const chunk = Buffer.alloc(160);
-        for (let i = 0; i < 160; i++)
-          chunk[i] = ulawEncode(pcm.readInt16LE(offset + i * 4));
-        const rtp = encodeRtp(chunk, call.seq++, call.stamp, call.ssrc);
-        call.stamp = (call.stamp + 160) >>> 0;
-        this.sock.send(rtp, call.remote.port, call.remote.ip);
-        await new Promise(resolve => setTimeout(resolve, 20));
+        const deadline = start + Math.max(0, i - RTP_PREROLL_PACKETS + 1) *
+          RTP_PACKET_MS;
+        while (performance.now() < deadline - 0.6) {
+          const remaining = deadline - performance.now();
+          await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.floor(remaining))));
+          if (this.call !== call) return;
+        }
+        const late = Math.max(0, performance.now() - deadline);
+        if (late > 30) latePackets++;
+        maxLate = Math.max(maxLate, late);
+        this.sock.send(frames[i], call.remote.port, call.remote.ip);
       }
+      // The last packet is transmitted ahead of playback. Retain echo
+      // suppression until the receiver has finished the audio stream.
+      const remaining = start + frames.length * RTP_PACKET_MS - performance.now();
+      if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
+      this.logger.info('Native MSN RTP playback: %d packets, max scheduling late %dms, late packets %d',
+                       frames.length, Math.round(maxLate), latePackets);
     } finally {
       call.micQuietUntil = Date.now() + 850;
       call.playing = false;

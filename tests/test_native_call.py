@@ -161,6 +161,45 @@ assert.equal(resamplePcm8To16(payload).length,640);
 assert.equal(parseRtp(Buffer.from('bad')),null);
 """)
 
+    def test_native_outgoing_audio_has_clocked_pacing_and_continuous_rtp(self):
+        self.run_js(r"""
+const assert = require('assert');
+const {performance} = require('perf_hooks');
+const {NativeCall,ulawDecode,parseRtp} = require('./native_call.js');
+const native = new NativeCall({
+  client:{},owner:'user@hermes.local',host:'127.0.0.1',
+  xpHost:'127.0.0.1',token:'x'.repeat(64),
+  logger:{info(){},warn(){},error(){}},
+});
+const times=[],frames=[];
+native.sock.send = (packet) => {
+  times.push(performance.now());frames.push(Buffer.from(packet));
+};
+const call = {remote:{ip:'127.0.0.1',port:25000},seq:42,stamp:4096,ssrc:1234};
+native.call=call;
+// 1 second PCM16 mono at 16kHz. Alternating +/- at Nyquist should be
+// averaged close to silence, NOT aliased into constant peak volume.
+const pcm=Buffer.alloc(32000);
+for(let i=0;i<pcm.length/2;i++)
+  pcm.writeInt16LE(i%2 ? -30000 : 30000,i*2);
+const begin=performance.now();
+native.playPcm16(call,pcm).then(()=>{
+  assert.equal(frames.length,50);
+  assert.equal(frames[0].readUInt16BE(2),42);
+  assert.equal(frames[49].readUInt16BE(2),91);
+  assert.equal(frames[0].readUInt32BE(4),4096);
+  assert.equal(frames[49].readUInt32BE(4),4096+160*49);
+  assert(frames[0][1]&0x80); // first packet marks new talkspurt
+  assert(!(frames[1][1]&0x80));
+  assert(times[3]-times[0]<35); // receiver gets 80ms pre-buffer immediately
+  assert(times.at(-1)-times[0]<975); // no cumulative 20ms sleep drift
+  assert(performance.now()-begin<1250);
+  assert(!call.playing);
+  assert(Math.abs(ulawDecode(parseRtp(frames[0])[0]))<150);
+  native.stop();
+}).catch(e=>{console.error(e);process.exit(2)});
+""")
+
     def test_rtp_silence_never_triggers_transcription_but_speech_does(self):
         self.run_js(r"""
 const assert = require('assert');

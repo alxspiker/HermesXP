@@ -1,6 +1,6 @@
 # HermesXP / MSN Messenger Bridge — prototype
 
-### Native Windows Live Messenger calls (v0.5.2 — LAN preview)
+### Native Windows Live Messenger calls (v0.5.3 — LAN preview)
 
 This is a **native MSN voice-call path**. The original Windows Live Messenger
 2009 window owns the microphone, speakers, and call UI. HermesXP.exe's legacy
@@ -33,6 +33,14 @@ Incoming RTP now uses speech-triggered recording with a short pre-roll,
 silence detection, and suppression of Hermes's greeting during playback.
 Silent calls no longer submit empty recordings to speech recognition.
 Wait until Hermes finishes speaking before replying (half-duplex).
+
+**Playback pacing fix (v0.5.3):** Hermes-to-Messenger speech no longer waits
+20ms after every packet, which accumulated RTP timing drift on the CPU-only
+server. Playback is scheduled against an absolute monotonic audio clock,
+with an initial 80ms jitter-buffer pre-roll. RTP sequence and 8kHz timestamp
+continuity are preserved, with a marker on the first packet of each reply.
+PCM16 samples are averaged before 16kHz-to-8kHz μ-law conversion to reduce
+aliasing. The bridge logs packet timing errors, not call contents.
 
 Optional private host settings: `HERMES_XP_VOICE_MODE=auto` (default),
 `agent` (full Hermes agent for all turns), or `fast` (local speech-only

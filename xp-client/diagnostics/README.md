@@ -6,7 +6,8 @@ Build on the Debian Hermes host with:
     bash xp-client/diagnostics/build-receiver.sh
 
 This creates a 32-bit Windows 5.01 console executable, not a replacement
-HermesXP client. It binds a regular UDP socket on 192.168.1.84:45678 for
+HermesXP client. It binds a regular UDP socket on the active XP interface,
+port 45678, for
 25 seconds; no raw-IP capture or administrator privileges are required.
 
 The diagnostic measures only timing and RTP header metadata for a test

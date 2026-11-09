@@ -109,7 +109,9 @@ void WINAPI mainCRTStartup(void) {
   }
   local.family = AF_INET;
   local.port = htons(RECEIVE_PORT);
-  local.address = inet_addr("192.168.1.84");
+  /* Bind whichever Windows XP interface is active (Wi-Fi or Ethernet).
+     The control-plane pairing and PCMU stream use the current DHCP lease. */
+  local.address = 0;
   for (int i=0;i<8;i++) local.padding[i] = 0;
   if (bind(sock, &local, sizeof(local)) != 0) {
     fail("bind", (DWORD)WSAGetLastError()); closesocket(sock);

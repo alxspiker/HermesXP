@@ -80,7 +80,9 @@ class TalkBridgeTests(unittest.TestCase):
         a, b = socket.socketpair()
         b.settimeout(2.0)
         try:
-            with patch.dict(os.environ, {"TALK_ECHO_GATE": "on"}):
+            with patch.dict(os.environ, {
+                "TALK_ECHO_GATE": "on", "HERMES_XP_TALK_BARGE_IN": "1",
+            }):
                 audio = bridge.SocketAudio(a)
             audio.start()
             bridge.receive(b)  # ready
@@ -126,6 +128,35 @@ class TalkBridgeTests(unittest.TestCase):
                     seen_clear = True
                     break
             self.assertTrue(seen_clear)
+            audio.stop()
+        finally:
+            b.close()
+
+    def test_default_half_duplex_blocks_loud_speaker_feedback(self):
+        """A loud WLM speaker echo must not cancel Talk's own response."""
+        a, b = socket.socketpair()
+        try:
+            with patch.dict(os.environ, {
+                "TALK_ECHO_GATE": "on", "HERMES_XP_TALK_BARGE_IN": "0",
+            }):
+                audio = bridge.SocketAudio(a)
+            self.assertFalse(audio.allow_barge_in)
+            audio.start()
+            self.assertEqual(bridge.receive(b)[0], b"R")
+            # Model output begins playing. Without an AEC, even a strong
+            # sound captured by the XP mic is not speaker-distinguishable.
+            audio.queue_playback(b"\0\x20" * (480 * 12))
+            self.assertEqual(bridge.receive(b)[0], b"O")
+            loud_feedback = b"\0\x70" * 480
+            b.sendall(bridge.frame(b"I", loud_feedback))
+            sample = None
+            for _ in range(40):
+                sample = audio.read_input_chunk()
+                if sample is not None:
+                    break
+                time.sleep(.01)
+            self.assertEqual(sample, b"\0" * 960)
+            self.assertEqual(audio.suppressed_frames, 1)
             audio.stop()
         finally:
             b.close()

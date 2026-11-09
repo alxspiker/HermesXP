@@ -273,6 +273,62 @@ assert(call.timerSlips>=4);
 native.stop();
 """)
 
+    def test_sparse_realtime_audio_waits_for_stable_playout_and_conceals_short_gap(self):
+        self.run_js(r"""
+const assert = require('assert');
+const {performance} = require('perf_hooks');
+const {NativeCall,parseRtp,ulawEncode,ulawDecode,talkFrame} = require('./native_call.js');
+const native=new NativeCall({
+ client:{},owner:'owner@example.invalid',host:'192.168.1.81',
+ xpHost:'192.168.1.84',token:'x'.repeat(64),
+ logger:{info(){},warn(){},error(){}}
+});
+const outbound=[];
+native.sock.send=packet=>outbound.push(Buffer.from(packet));
+const now=performance.now();
+const call={
+ remote:{ip:'192.168.1.84',port:24500},seq:30,stamp:10000,ssrc:12,
+ talkReady:true,talk:{destroy(){}},talkIncoming:Buffer.alloc(0),
+ talkRemainder:Buffer.alloc(0),output:Buffer.alloc(0),
+ outSpeaking:false,packetAt:now,lastOutputAt:0,
+ firstOutputAt:0,underflowRun:0
+};
+native.call=call;
+const pcm=Buffer.alloc(960*5);
+for(let i=0;i<pcm.length/2;i++)pcm.writeInt16LE(5000,i*2);
+native.onTalkData(call,talkFrame('O',pcm));
+assert.equal(call.output.length,800);
+// Previously an idle period of 250ms started this undersized speech burst,
+// making the model's next word arrive after the playout buffer ran dry.
+call.firstOutputAt=performance.now()-350;
+call.packetAt=performance.now()-10;
+native.tickTalkAudio(call);
+assert.equal(call.output.length,800);
+assert.equal(parseRtp(outbound.at(-1))[0],0xff);
+// An 850ms maximum wait still releases genuinely short answers.
+call.firstOutputAt=performance.now()-900;
+call.packetAt=performance.now()-10;
+native.tickTalkAudio(call);
+assert.equal(call.output.length,640);
+assert(outbound.at(-1)[1] & 0x80);
+const speech=outbound.at(-1);
+// Deliberate 20ms provider starvation fades the LAST PCM frame rather than
+// inserting a hard zero, making a missed audio delta less noticeable.
+call.output=Buffer.alloc(0);
+call.packetAt=performance.now()-10;
+native.tickTalkAudio(call);
+const concealed=outbound.at(-1);
+assert.equal(call.concealedFrames,1);
+assert(Math.abs(ulawDecode(parseRtp(concealed)[0])) > 100);
+assert(Math.abs(ulawDecode(parseRtp(concealed)[0])) <
+       Math.abs(ulawDecode(parseRtp(speech)[0])));
+// A truncated provider response cancels that held playout state.
+native.onTalkData(call,talkFrame('D'));
+assert.equal(call.firstOutputAt,0);
+assert.equal(call.lastSpeechPacket,null);
+native.stop();
+""")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -28,8 +28,9 @@ const RTP_PREROLL_PACKETS = 4;
 // The host's Talk transport and Messenger RTP have independent clocks.
 // A real MSN call had 28 playout underflows despite zero LAN packet loss and
 // zero RTP clock skips. Prefer smoother playback: 800ms speech preroll.
-// Short replies still flush via the existing 250ms stale-tail rule.
+// Short replies still start after at most 850ms of accumulated playout delay.
 const RTP_SPEECH_START_BYTES = 40 * RTP_SAMPLES_PER_PACKET;
+const RTP_MAX_SPEECH_START_WAIT_MS = 850;
 const RTP_MAX_CATCHUP_MS = 30;
 
 function parseSip(data) {
@@ -234,10 +235,10 @@ class NativeCall {
   logCallStats(call, kind = 'periodic') {
     this.logger.info(
       'Messenger RTP %s: incoming=%d missing=%d talk_pcm=%dms played=%dms ' +
-      'underflows=%d clock_skips=%d queued=%dms peak_buffer=%dms interruptions=%d',
+      'underflows=%d concealed=%d clock_skips=%d queued=%dms peak_buffer=%dms interruptions=%d',
       kind, call.incomingFrames || 0, call.incomingLost || 0,
       Math.round(call.outReceivedMs || 0), Math.round(call.outPlayedMs || 0),
-      call.outputUnderflows || 0, call.timerSlips || 0,
+      call.outputUnderflows || 0, call.concealedFrames || 0, call.timerSlips || 0,
       Math.round((call.output?.length || 0) / 8),
       call.maxBufferedMs || 0, call.interruptions || 0);
   }
@@ -475,6 +476,10 @@ class NativeCall {
     call.readyAt = 0;
     call.outSpeaking = false;
     call.packetAt = performance.now();
+    call.firstOutputAt = 0;
+    call.underflowRun = 0;
+    call.lastSpeechPacket = null;
+    call.concealedFrames = 0;
     call.outputUnderflows = 0;
     call.timerSlips = 0;
     call.incomingLost = 0;
@@ -533,6 +538,9 @@ class NativeCall {
         call.talkRemainder = Buffer.alloc(0);
         call.outSpeaking = false;
         call.lastOutputAt = 0;
+        call.firstOutputAt = 0;
+        call.lastSpeechPacket = null;
+        call.underflowRun = 0;
       } else if (type === 'X') {
         this.logger.warn('Hermes Talk rejected native call (%s)',
                          payload.toString('ascii').slice(0, 100));
@@ -550,6 +558,8 @@ class NativeCall {
           compressed[i] = ulawEncode(Math.round((a + b + c) / 3));
         }
         call.talkRemainder = combined.subarray(samples * 6);
+        if (samples && !call.firstOutputAt)
+          call.firstOutputAt = performance.now();
         call.output = Buffer.concat([call.output, compressed]);
         call.outReceivedMs += compressed.length / 8;
         call.maxBufferedMs = Math.max(
@@ -587,26 +597,48 @@ class NativeCall {
     }
     if (call.packetAt > now + 1) return;
     const buffered = call.output.length;
-    const staleShortReply = buffered >= 160 && call.lastOutputAt &&
-      now - call.lastOutputAt > 250;
+    // The previous 250ms idle-tail trigger could start a tiny burst of
+    // provider audio before a jitter cushion had formed. That produces
+    // audible mid-word underflows when the provider resumes streaming.
+    // Wait for either 800ms of PCM or ~850ms from first received PCM.
+    // The latter ensures genuinely short replies can still play.
+    const startupWaitElapsed = call.firstOutputAt &&
+      now - call.firstOutputAt >= RTP_MAX_SPEECH_START_WAIT_MS;
     let marker = false;
     let out;
     if (buffered >= 160 &&
-        (call.outSpeaking || buffered >= RTP_SPEECH_START_BYTES || staleShortReply)) {
+        (call.outSpeaking || buffered >= RTP_SPEECH_START_BYTES || startupWaitElapsed)) {
       out = call.output.subarray(0, 160);
       call.output = call.output.subarray(160);
       if (!call.outSpeaking) {marker = true; call.outSpeaking = true;}
       call.outPlayedMs = (call.outPlayedMs || 0) + RTP_PACKET_MS;
+      call.underflowRun = 0;
+      call.lastSpeechPacket = out;
     } else {
       out = Buffer.alloc(160, 0xff);
       if (call.outSpeaking) {
         call.outputUnderflows = (call.outputUnderflows || 0) + 1;
+        call.underflowRun = (call.underflowRun || 0) + 1;
+        // Conceal up to 40ms of mid-word packet starvation instead of
+        // abruptly inserting silence. Decode the last PCMU frame, fade its
+        // samples toward zero, and encode it again. Long pauses still turn
+        // into real silence, rather than looping audio indefinitely.
+        if (call.lastSpeechPacket && call.underflowRun <= 2) {
+          const gain = call.underflowRun === 1 ? 0.52 : 0.20;
+          for (let i = 0; i < out.length; i++)
+            out[i] = ulawEncode(Math.round(ulawDecode(call.lastSpeechPacket[i]) * gain));
+          call.concealedFrames = (call.concealedFrames || 0) + 1;
+        }
         // A 20-100ms provider/OS gap is not the end of an utterance. If we
         // reset on each missing frame, the new 800ms jitter-buffer preroll
         // is paid REPEATEDLY mid-sentence: this is audible as chopped words.
         // Stay in the speech phase across short gaps; do not invent samples.
-        if (!call.lastOutputAt || now - call.lastOutputAt > 550)
+        if (!call.lastOutputAt || now - call.lastOutputAt > 550) {
           call.outSpeaking = false;
+          call.firstOutputAt = 0;
+          call.lastSpeechPacket = null;
+          call.underflowRun = 0;
+        }
       }
     }
     const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);

@@ -168,10 +168,14 @@ sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/hermes-xp-package.service" > "$HOME/.co
 # The plugin's root checkout includes the server/build/update code. The
 # updater service therefore never needs a separate ~/HermesXP checkout.
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+sed -e "s|__HOME__|$HOME|g" -e "s|__REPO_ROOT__|$REPO_ROOT|g" \
+    -e "s|__LAN_IP__|$LAN_IP|g" "$SCRIPT_DIR/hermes-xp-voice.service" \
+    > "$HOME/.config/systemd/user/hermes-xp-voice.service"
 sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" "$SCRIPT_DIR/hermes-xp-update.service" > "$HOME/.config/systemd/user/hermes-xp-update.service"
 cp "$SCRIPT_DIR/hermes-xp-update.path" "$HOME/.config/systemd/user/hermes-xp-update.path"
 cp "$SCRIPT_DIR/hermes-xp-update.timer" "$HOME/.config/systemd/user/hermes-xp-update.timer"
 systemctl --user daemon-reload
+systemctl --user enable --now hermes-xp-voice.service || warn "voice companion unavailable; see journalctl --user -u hermes-xp-voice"
 # Stop any old host before rebuilding: it may serve a legacy archive with secrets.
 # Refuse to proceed if it cannot be stopped.
 systemctl --user disable --now hermes-xp-package.service || { warn "could not disable and stop the package host service"; exit 1; }
@@ -184,5 +188,5 @@ fi
 systemctl --user enable --now hermes-xp-update.path hermes-xp-update.timer
 log "HermesXP plugin-change watcher + offline-device retry timer enabled"
 
-log "done. Check: systemctl --user status msn-server.service hermes-msn-bridge.service msn-tls.service"
+log "done. Check: systemctl --user status msn-server.service hermes-msn-bridge.service hermes-xp-voice.service msn-tls.service"
 log "Next: restart the Hermes gateway so the hermes_msn platform connects, then test WLM sign-in on the XP."

@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.3.2
-description: "HermesXP full-source plugin: local MSN bridge/server installer, XP client and rollback helper, and authenticated LAN-only client updater. Windows XP never downloads from GitHub. Initial setup details are in after-install.md."
+version: 0.4.0
+description: "HermesXP MSN messaging and opt-in voice companion preview: paired-device speech recording, local Hermes agent and TTS, and auto-updated XP executable. Native Windows Live Messenger voice calls are not yet implemented."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process
@@ -11,6 +11,9 @@ requires_env:
     description: Only this MSN address may send messages to Hermes (lowercase)
     password: false
 optional_env:
+  - name: HERMES_XP_VOICE_BIND
+    description: Private Hermes LAN IPv4 address for the separate authenticated speech endpoint (default detected from host)
+    password: false
   - name: HERMES_XP_PROBE_BIND
     description: Optional local LAN IPv4 bind address for read-only XP connectivity checks (leave blank to disable)
     password: false

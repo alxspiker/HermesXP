@@ -1,5 +1,59 @@
 # HermesXP / MSN Messenger Bridge — prototype
 
+### Voice companion preview (v0.4.0)
+
+The XP executable now has **Talk to Hermes (5s)**, a push-to-talk-style
+microphone/speaker path to the local Hermes host. From your MSN chat with the
+Hermes bot, send **`/call`** to display an incoming voice invitation in
+HermesXP. Accept on XP before the microphone is activated. Send **`/hangup`**
+to stop playback/polling, or press the Stop voice button.
+
+**This is not yet a native Windows Live Messenger Computer Call.** WLM's
+original **Call** toolbar initiates its own SIP/P2P/RTP negotiation. Neither
+the lightweight MSN bot in this repository nor the pinned local MSN server
+provides the necessary call negotiation/media relay today. `/call` is an
+MSN text command which asks a *separate HermesXP companion* to open a voice
+session. It does not ring inside WLM's native voice-call UI.
+
+How the prototype works:
+
+1. XP uses built-in WinMM to record up to five seconds at 16-kHz mono PCM16.
+2. XP submits the audio over authenticated LAN HTTP on host port **18770**.
+3. The Hermes host uses the **same local LFM3-Audio endpoints and local
+   Hermes api_server agent model route as the Hermes Talk Discord cascade**.
+   Transcription, agent inference, and speech synthesis run only on Hermes.
+4. XP polls for the completed audio and plays the answer through WinMM.
+   This preview is **half-duplex**, not a continuous low-latency call:
+   each spoken turn requires another click, and long CPU model inference may
+   cause a significant delay.
+
+The voice service is provisioned automatically by
+`local-server/install.sh` or the plugin's host-side update service. It
+uses `~/.hermes/.env` for the same `API_SERVER_KEY` as Hermes Talk, and
+`~/.hermes/hermesxp-devices.json` for the existing paired-device token/IP.
+There is **no new XP pairing secret**, paid voice API, or direct XP internet
+dependency. The existing XP companion update mechanism replaces the EXE,
+retaining `hermesxp.ini`. Until that update arrives, MSN text chat continues
+to work; older XP binaries simply do not recognize incoming invitations.
+
+For a manually installed host, or to troubleshoot:
+
+```bash
+systemctl --user status hermes-xp-voice.service
+journalctl --user -u hermes-xp-voice.service -n 40 --no-pager
+```
+
+Only the paired XP computer should be permitted to reach TCP/18770 on your
+firewall. The voice service validates both the source IPv4 and the existing
+per-device 256-bit token; it binds a **specific private host LAN address**.
+No public listener, UPnP, or automatic firewall change is introduced.
+An untrusted network must **not** be used for this plain-HTTP audio path.
+
+If the speech service fails, first confirm
+`lfm3-audio-server.service` and the Hermes `api_server` are running on the
+host (default loopback ports 8899 and 8642 respectively). The Windows XP
+machine itself never needs LFM3 or Python.
+
 ### Plugin-managed updates (v0.3)
 
 Install the entire Git repository as a Hermes plugin:

@@ -37,6 +37,20 @@ if [ "$REVISION" != "$CURRENT" ]; then
   fi
   systemctl --user try-restart hermes-gateway.service || true
   systemctl --user try-restart hermes-msn-bridge.service || true
+  # Install/refresh the voice service from the same pinned plugin checkout.
+  # The service binds a specific LAN IP and authenticates against the private
+  # paired-device registry. No firewall holes are created automatically.
+  VOICE_IP="${HERMES_XP_VOICE_BIND:-$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p')}"
+  if [ -n "$VOICE_IP" ]; then
+    sed -e "s|__HOME__|$HOME|g" -e "s|__REPO_ROOT__|$REPO|g" \
+        -e "s|__LAN_IP__|$VOICE_IP|g" "$REPO/local-server/hermes-xp-voice.service" \
+        > "$HOME/.config/systemd/user/hermes-xp-voice.service"
+    systemctl --user daemon-reload
+    systemctl --user enable --now hermes-xp-voice.service || echo "[update-xp] voice service needs attention"
+    systemctl --user try-restart hermes-xp-voice.service || true
+  else
+    echo "[update-xp] voice LAN IP unavailable; host voice service not started"
+  fi
   printf '%s\n' "$REVISION" > "$REV_FILE.tmp"
   mv -f "$REV_FILE.tmp" "$REV_FILE"
 fi

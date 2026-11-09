@@ -1,0 +1,16 @@
+LIBRARY winmm.dll
+EXPORTS
+_waveInOpen@24=waveInOpen
+_waveInPrepareHeader@12=waveInPrepareHeader
+_waveInAddBuffer@12=waveInAddBuffer
+_waveInStart@4=waveInStart
+_waveInStop@4=waveInStop
+_waveInReset@4=waveInReset
+_waveInUnprepareHeader@12=waveInUnprepareHeader
+_waveInClose@4=waveInClose
+_waveOutOpen@24=waveOutOpen
+_waveOutPrepareHeader@12=waveOutPrepareHeader
+_waveOutWrite@12=waveOutWrite
+_waveOutReset@4=waveOutReset
+_waveOutUnprepareHeader@12=waveOutUnprepareHeader
+_waveOutClose@4=waveOutClose

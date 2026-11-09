@@ -9,6 +9,8 @@ const http = require('http');
 const crypto = require('crypto');
 const path = require('path');
 const readline = require('readline');
+const fs = require('fs');
+const os = require('os');
 const MSNClient = require('./msnclient/main.js').MSNClient;
 
 const email = process.env.MSN_BOT_EMAIL;
@@ -23,7 +25,11 @@ if (!email || !password || !token || token.length < 32) {
 // Standalone Hermes send_message (CLI/cron/tool subprocess) runs outside the
 // gateway's Python process. Give it a narrow authenticated loopback-only way
 // to ask the EXISTING logged-in MSN bot to send a text message.
-const STANDALONE_SEND_PORT = 18769;
+const STANDALONE_SEND_PORT = Number(process.env.HERMES_MSN_STANDALONE_PORT || 18769);
+if (!Number.isInteger(STANDALONE_SEND_PORT) || STANDALONE_SEND_PORT < 1 ||
+    STANDALONE_SEND_PORT > 65535) {
+  throw new Error('Invalid standalone MSN bridge port');
+}
 const MAX_SEND_BODY = 8192;
 function authenticated(request) {
   const provided = request.headers['x-hermes-token'];
@@ -74,6 +80,51 @@ standaloneServer.on('error', error => {
 });
 
 const client = new MSNClient(email, password);
+// A Messenger /call text command requests an authenticated invitation from
+// the XP companion. This is NOT native Messenger SIP/RTP calling. The XP user
+// must confirm the invite before the microphone starts recording.
+function pairedVoiceDevice() {
+  const registry = path.join(process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'),
+                             'hermesxp-devices.json');
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(registry, 'utf8')); }
+  catch { return null; }
+  const devices = Array.isArray(parsed.devices) ? parsed.devices : [];
+  // One sender/account maps to the first paired XP. Never fan out a call to
+  // every old machine or accept arbitrary/public addresses from the registry.
+  for (const dev of devices) {
+    if (!dev || typeof dev.host !== 'string' || net.isIP(dev.host) !== 4 ||
+        !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(dev.host) ||
+        typeof dev.token !== 'string' || !/^[0-9a-f]{64}$/i.test(dev.token)) continue;
+    const port = dev.port === undefined ? 18768 : dev.port;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+    return {host: dev.host, port, token: dev.token};
+  }
+  return null;
+}
+function sendVoiceControl(route) {
+  const dev = pairedVoiceDevice();
+  if (!dev) return Promise.resolve('No paired XP companion is configured.');
+  return new Promise(resolve => {
+    const req = http.request({
+      hostname: dev.host, port: dev.port, path: route, method: 'POST',
+      timeout: 7000,
+      headers: {'X-Hermes-Token': dev.token, 'Content-Length': '0'}
+    }, res => {
+      res.resume();
+      res.on('end', () => {
+        resolve(res.statusCode === 202
+          ? route === '/voice/invite' ? 'Hermes voice invite sent. Accept it in HermesXP.'
+                                      : 'HermesXP voice stop requested.'
+          : 'HermesXP voice control was refused.');
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', () => resolve('HermesXP is offline or its voice listener is unavailable.'));
+    req.end();
+  });
+}
+let lastVoiceCommand = 0;
 let bridge, bridgeReady = false;
 let backlog = [];
 function write(obj) {
@@ -124,6 +175,16 @@ client.on('msg', msg => {
   if (!msg || msg.type !== 'message' || typeof msg.user !== 'string' || typeof msg.body !== 'string') return;
   const owner = String(process.env.HERMES_MSN_OWNER_EMAIL || '').trim().toLowerCase();
   if (!owner || msg.user.trim().toLowerCase() !== owner) return;
+  const command = msg.body.trim().toLowerCase();
+  if (command === '/call' || command === '/hangup') {
+    const now = Date.now();
+    if (command === '/call' && now - lastVoiceCommand < 2000) return;
+    if (command === '/call') lastVoiceCommand = now;
+    sendVoiceControl(command === '/call' ? '/voice/invite' : '/voice/end')
+      .then(note => client.sendMessage(owner, note))
+      .catch(error => console.error('MSN voice command:', error.message));
+    return;
+  }
   const item = {type:'incoming',sender:owner,body:msg.body.slice(0,4000)};
   if (!write(item)) {
     if (backlog.length >= 16) backlog.shift();

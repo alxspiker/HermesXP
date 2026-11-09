@@ -1,0 +1,19 @@
+[Unit]
+Description=HermesXP paired-device voice companion (not native WLM calls)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-__HOME__/.hermes/.env
+ExecStart=/usr/bin/python3 __REPO_ROOT__/tools/voice_gateway.py --bind __LAN_IP__
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=default.target

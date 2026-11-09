@@ -25,6 +25,7 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define WM_COMMAND 0x111
 #define WM_TIMER 0x113
 #define WM_CLOSE 16
+#define WM_HERMESXP_VOICE_INVITE 0x8001
 #define MB_OK 0
 #define MB_ICONINFORMATION 0x40
 #define MB_ICONWARNING 0x30
@@ -199,6 +200,7 @@ IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
 static HINSTANCE g_instance; static HWND g_host, g_status, g_network_status, g_main_window;
 static int g_update_activation;
 static char g_remote_token[65], g_remote_allowed_ip[16];
+static volatile LONG g_voice_cancel=0;
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
 static void append_number(char *out,int *pos,unsigned int value){
  char rev[10];int n=0;
@@ -988,6 +990,13 @@ static DWORD WINAPI screenshot_server(void *param){
              request_is(req,"GET","/update/helper-status")){
     if(bodyLen!=0)send_http_text(cli,"400 Bad Request","status takes no body");
     else handle_update_status(cli,request_is(req,"GET","/update/helper-status"));
+   } else if(request_is(req,"POST","/voice/invite") && bodyLen==0){
+    if(g_main_window && PostMessageA(g_main_window,WM_HERMESXP_VOICE_INVITE,0,0))
+     send_http_text(cli,"202 Accepted","voice invite delivered");
+    else send_http_text(cli,"503 Unavailable","voice window unavailable");
+   } else if(request_is(req,"POST","/voice/end") && bodyLen==0){
+    g_voice_cancel=1;
+    send_http_text(cli,"202 Accepted","stop requested");
    } else if(request_is(req,"GET","/screenshot.bmp")){
     if(bodyLen!=0){send_http_text(cli,"400 Bad Request","screenshot takes no body");}
     else {
@@ -1028,6 +1037,7 @@ static DWORD WINAPI screenshot_server(void *param){
  }
  return 0;
 }
+#include "voice_turn.h"
 static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
  if(msg==WM_CREATE){
   char dir[512], ini[512], host[100], ownerLine[160];
@@ -1057,9 +1067,10 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
   refresh_network_status();
   SetTimer(h,1,15000,NULL);
   g_status=add("STATIC","Ready. Test only: remote controls are disabled.",0,18,270,383,24,h,104);
+  g_voice_button=add("BUTTON","Talk to Hermes (5s)",WS_TABSTOP,18,297,214,27,h,117);
   if(!g_remote_token[0] || !g_remote_allowed_ip[0]) update_status("Remote UI locked; configure [Remote] Token and AllowedHostIP.");
-  add("STATIC","Install places the CA, Switcher files and settings for Messenger.",0,18,302,386,24,h,105);
-  add("STATIC","Windows XP SP3  |  32-bit  |  HermesXP prototype",0,18,332,386,22,h,106);
+  add("STATIC","Voice companion uses LAN audio, not Messenger's native Call.",0,18,332,390,22,h,105);
+  add("STATIC","Windows XP SP3  |  32-bit  |  HermesXP voice preview",0,18,358,390,22,h,106);
   return 0;
  }
  if(msg==WM_COMMAND && (w&0xFFFF)==103){probe(h);return 0;}
@@ -1071,9 +1082,17 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
  }
  if(msg==WM_COMMAND && (w&0xFFFF)==111){open_windows_network_connections(h);return 0;}
  if(msg==WM_COMMAND && (w&0xFFFF)==115){refresh_network_status();return 0;}
+ if(msg==WM_COMMAND && (w&0xFFFF)==117){voice_toggle();return 0;}
+ if(msg==WM_HERMESXP_VOICE_INVITE){
+  if(!g_voice_running &&
+    MessageBoxA(h,"Hermes is calling from MSN. Accept voice conversation?\n\nThis uses the HermesXP audio companion, not native Messenger calling.",
+                "Incoming Hermes voice invite",MB_YESNO|MB_ICONINFORMATION)==IDYES)
+   voice_toggle();
+  return 0;
+ }
  if(msg==WM_TIMER && w==1){refresh_network_status();return 0;}
  if(msg==WM_CLOSE){DestroyWindow(h);return 0;}
- if(msg==WM_DESTROY){KillTimer(h,1);PostQuitMessage(0);return 0;}
+ if(msg==WM_DESTROY){g_voice_cancel=1;KillTimer(h,1);PostQuitMessage(0);return 0;}
  return DefWindowProcA(h,msg,w,l);
 }
 static void load_remote_config(void){
@@ -1112,7 +1131,7 @@ void WINAPI WinMainCRTStartup(void){
  c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
  c.lpszMenuName=NULL; c.lpszClassName="HermesXPMainWindow";
  if(!RegisterClassA(&c))ExitProcess(2);
- h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,410,NULL,NULL,g_instance,NULL);
+ h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,440,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
  g_main_window=h;
  /* Updater candidate validation: load all DLLs, create the custom window,

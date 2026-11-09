@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import unittest
 from pathlib import Path
@@ -48,7 +49,7 @@ function req(to,text,token){
   return new Promise((resolve,reject)=>{
     let bytes=Buffer.from(JSON.stringify({to,text}));
     let request=http.request({
-      host:'127.0.0.1',port:18769,path:'/send',method:'POST',
+      host:'127.0.0.1',port:Number(process.env.HERMES_MSN_STANDALONE_PORT),path:'/send',method:'POST',
       headers:{'X-Hermes-Token':token,'Content-Length':bytes.length}
     },response=>{
       let body='';response.on('data',b=>body+=b);
@@ -70,13 +71,81 @@ setTimeout(async ()=>{
   }catch(err){console.error(err);process.exit(9);}
 },120);
 '''
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            test_port = listener.getsockname()[1]
         env = dict(os.environ, MSN_BOT_EMAIL='bot@example.invalid', MSN_BOT_PASSWORD='test',
                    HERMES_MSN_OWNER_EMAIL='owner@example.invalid',
-                   HERMES_MSN_BRIDGE_TOKEN='z'*32)
+                   HERMES_MSN_BRIDGE_TOKEN='z'*32, HERMES_MSN_STANDALONE_PORT=str(test_port))
         result = subprocess.run(['node', '-e', harness, str(ROOT / 'msn-bridge' / 'bridge.js')],
                                 env=env, capture_output=True, text=True, timeout=4)
         self.assertEqual(result.returncode, 0, result.stdout[-350:]+result.stderr[-350:])
         self.assertIn('STANDALONE_MSN_AUTH_TEST_PASS', result.stdout)
+
+    def test_authorized_msn_call_invites_paired_xp_without_starting_mic(self):
+        """The native WLM Call button is not emulated; the /call text
+        command only queues a consent-gated notification in HermesXP."""
+        harness = r'''
+const EventEmitter = require('events');
+const Module = require('module');
+const fs = require('fs');
+const http = require('http');
+const original = Module._load;
+const seen = [];
+fs.readFileSync = new Proxy(fs.readFileSync, {
+  apply(target, self, args) {
+    if (String(args[0]).endsWith('hermesxp-devices.json'))
+      return JSON.stringify({devices: [{host:'192.168.1.84',port:18768,token:'a'.repeat(64)}]});
+    return Reflect.apply(target, self, args);
+  }
+});
+http.request = (options, callback) => {
+  seen.push(options);
+  const request = new EventEmitter();
+  request.end = () => {
+    const response = new EventEmitter();
+    response.statusCode = 202;
+    response.resume = () => {};
+    callback(response);
+    setImmediate(() => response.emit('end'));
+  };
+  request.destroy = () => {};
+  return request;
+};
+class FakeClient extends EventEmitter {
+  constructor(){super();this.active=true;}
+  execute() {
+    this.emit('msg',{type:'message',user:'stranger@example.invalid',body:'/call'});
+    this.emit('msg',{type:'message',user:'owner@example.invalid',body:'/call'});
+  }
+  sendMessage(to,text){ seen.push({sent:to,text}); }
+}
+Module._load = function(request,...args){
+  if(request === './msnclient/main.js') return {MSNClient:FakeClient};
+  return original.call(this,request,...args);
+};
+require(process.argv[1]);
+setTimeout(() => {
+  const invite = seen.filter(x=>x.path === '/voice/invite');
+  const reply = seen.filter(x=>x.sent);
+  const ok = invite.length === 1 && invite[0].hostname === '192.168.1.84' &&
+    invite[0].method === 'POST' && invite[0].headers['X-Hermes-Token'] === 'a'.repeat(64) &&
+    reply.length === 1 && reply[0].text.includes('Accept it in HermesXP');
+  console.log(ok?'MSN_CALL_CONSENT_TEST_PASS':'MSN_CALL_CONSENT_TEST_FAIL');
+  process.exit(ok?0:8);
+},80);
+'''
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            test_port = listener.getsockname()[1]
+        env = dict(os.environ, MSN_BOT_EMAIL='bot@example.invalid', MSN_BOT_PASSWORD='test',
+                   HERMES_MSN_OWNER_EMAIL='owner@example.invalid',
+                   HERMES_MSN_BRIDGE_TOKEN='z'*32,
+                   HERMES_MSN_STANDALONE_PORT=str(test_port))
+        result = subprocess.run(['node', '-e', harness, str(ROOT / 'msn-bridge' / 'bridge.js')],
+                                env=env, capture_output=True, text=True, timeout=4)
+        self.assertEqual(result.returncode, 0, result.stdout[-350:]+result.stderr[-350:])
+        self.assertIn('MSN_CALL_CONSENT_TEST_PASS', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

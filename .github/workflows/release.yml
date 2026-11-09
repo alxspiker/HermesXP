@@ -1,0 +1,57 @@
+name: HermesXP release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-xp:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install cross compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm nsis
+      - name: Build generic XP executables on Linux
+        run: bash local-server/build-exe.sh "$PWD"
+      - name: Run tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -q
+      - name: Create release manifest
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          from tools.release_assets import write_release_manifest
+          root = Path.cwd()
+          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          manifest = write_release_manifest(
+              root / "dist", version,
+              subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          )
+          expected = next(
+              line.split(":", 1)[1].strip()
+              for line in (root / "plugin.yaml").read_text().splitlines()
+              if line.startswith("version:")
+          )
+          if version != expected:
+              raise SystemExit(f"Tag v{version} does not match plugin version {expected}")
+          print("Release manifest:", manifest)
+          PY
+      - name: Publish only machine-independent binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/HermesXP.exe dist/HermesXP-Updater.exe \
+            dist/SHA256SUMS dist/RELEASE.json \
+            --verify-tag --title "HermesXP $GITHUB_REF_NAME" \
+            --notes "Generic Windows XP SP3 x86 binaries. Install/pair through a Hermes host; no XP internet access or private configuration is included."

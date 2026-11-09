@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.3)
+### Native Messenger calls (v0.6.4)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -110,8 +110,8 @@ HERMES_XP_TALK_DIRECT_TOOLS=1
 This requires the matching `hermes-talk-custom` fork v0.22.3+, whose
 explicitly scoped classification permits the authenticated HermesXP
 `hermes_execute` foreground tool while refusing unknown voice tools on
-every other surface. HermesXP advertises two voice tools: `hermes_execute`
-and `get_current_time`. The first runs the locally installed `hermes -z`
+every other surface. HermesXP advertises one voice tool: `hermes_execute`,
+which runs the locally installed `hermes -z`
 using the **CLI's existing tools/models and approval policy**, waits for
 the reply and speaks it through Talk. This is a foreground **new Hermes CLI
 turn**, not a background delegation, not the existing MSN text session,
@@ -134,6 +134,19 @@ audio-underflow, clock-skip and buffer statistics every 12 seconds while
 an MSN call is active, including when Windows Live Messenger omits SIP BYE.
 These measurements help distinguish network/scheduler gaps from the XP
 decoder or sound card.
+
+**Playback continuity (v0.6.4):** The last real Messenger call showed no
+incoming RTP packet loss and no RTP timer skips, but 28 playback
+underflow packets and three playback interruptions. The speech-start
+queue is now 800ms instead of 400ms. During playback, echo suppression
+keeps the Realtime provider's 20ms input clock continuous by **replacing**
+suppressed microphone audio with PCM silence (instead of deleting frames),
+and covers up to 1.1s of delayed XP speaker output. This is still a
+heuristic acoustic gate rather than full acoustic echo cancellation.
+For a physically trusted paired operator, one `hermes_execute` voice tool
+now handles real Hermes tasks; the redundant `get_current_time` tool
+has been removed from HermesXP and from the matching Talk fork 0.22.4+.
+More buffering adds about 400ms to the start of long answers.
 
 To diagnose:
 

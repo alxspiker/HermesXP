@@ -89,7 +89,10 @@ class TalkBridgeTests(unittest.TestCase):
             self.assertGreater(audio.output_level, .1)
             b.sendall(bridge.frame(b"I", b"\0\x04" * 480))
             time.sleep(.025)
-            self.assertIsNone(audio.read_input_chunk())  # speaker leakage
+            self.assertEqual(audio.read_input_chunk(), b"\0" * 960)
+            self.assertGreaterEqual(audio.suppressed_frames, 1)
+            # Silencing, not dropping, maintains a continuous 20ms audio
+            # clock for the provider's speech activity detector.
             speech = b"\0\x70" * 480
             b.sendall(bridge.frame(b"I", speech))
             actual = None
@@ -99,7 +102,21 @@ class TalkBridgeTests(unittest.TestCase):
                     break
                 time.sleep(.01)
             self.assertEqual(actual, speech)  # louder deliberate interruption
+            # XP may still be playing the last frame 600ms AFTER our
+            # server-side output queue drains. Preserve the VAD clock while
+            # rejecting that delayed acoustic echo.
+            with audio.lock:
+                audio.output_at = time.monotonic() - .6
+                audio.output_level = .2
             audio.drain_playback()
+            b.sendall(bridge.frame(b"I", b"\0\x04" * 480))
+            tail = None
+            for _ in range(30):
+                tail = audio.read_input_chunk()
+                if tail is not None:
+                    break
+                time.sleep(.01)
+            self.assertEqual(tail, b"\0" * 960)
             # A cancellation is sent to the RTP bridge to flush any
             # packets already forwarded but not yet heard by Messenger.
             seen_clear = False
@@ -153,7 +170,7 @@ class TalkBridgeTests(unittest.TestCase):
             self.assertIn("host_execution_attachment", captured)
             self.assertEqual(
                 {tool["name"] for tool in captured["host_execution_attachment"].tool_definitions()},
-                {"hermes_execute", "get_current_time"},
+                {"hermes_execute"},
             )
         finally:
             a.close()
@@ -179,6 +196,7 @@ class TalkBridgeTests(unittest.TestCase):
     def test_voice_tool_invokes_hermes_directly_no_shell_or_delegation(self):
         tool = bridge.HermesVoiceExecution()
         definitions = tool.tool_definitions()
+        self.assertEqual(len(definitions), 1)
         self.assertNotIn("delegate_task", {item["name"] for item in definitions})
         permit = tool.mint_tool_call_permit(
             tool_name="hermes_execute", call_id="voice-1",

@@ -39,6 +39,10 @@ PCM_BYTES_PER_SECOND = SAMPLE_RATE * 2
 FRAME_BYTES = 960  # 20 ms of 24 kHz mono PCM16; maps to one PCMU/8000 RTP packet
 MAX_PLAYBACK_BYTES = PCM_BYTES_PER_SECOND * 20
 PLAYBACK_PREROLL_FRAMES = 4
+# Node starts RTP playout with 800ms buffered. The XP speakers can still be
+# audible after our output queue has drained, so keep the microphone echo
+# gate active over that last physical playback window.
+ECHO_OUTPUT_HOLD_S = 1.1
 MAX_TOOL_PROMPT = 4000
 MAX_TOOL_OUTPUT = 5000
 MAX_TOOL_CALLS = 12
@@ -90,25 +94,13 @@ class HermesVoiceExecution:
                     "additionalProperties": False,
                 },
             },
-            {
-                "name": "get_current_time",
-                "description": "Read the current host clock or an IANA timezone directly, without delegating.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "timezone": {"type": "string", "description":
-                                     "Optional IANA timezone such as America/Edmonton."}
-                    },
-                    "additionalProperties": False,
-                },
-            },
         )
 
     def mint_tool_call_permit(self, **kwargs):
         name = kwargs.get("tool_name")
         args = kwargs.get("arguments")
         call_id = kwargs.get("call_id")
-        if self.closed or name not in {"hermes_execute", "get_current_time"}:
+        if self.closed or name != "hermes_execute":
             raise ValueError("HermesXP voice tool not authorized")
         if not isinstance(call_id, str) or not call_id or not isinstance(args, dict):
             raise ValueError("invalid HermesXP tool call")
@@ -129,11 +121,7 @@ class HermesVoiceExecution:
             if issued is None or issued[0] is not permit or self.closed:
                 raise ValueError("Expired or invalid HermesXP voice permit")
             _, call_id, name, args = issued
-            if name == "get_current_time":
-                from hermes_plugins.hermes_talk import talk_tools
-                output = talk_tools.execute_talk_tool(name, args)
-            else:
-                output = await to_thread(self._run_hermes, args.get("request"))
+            output = await to_thread(self._run_hermes, args.get("request"))
             results.append({"call_id": call_id, "output": output[:MAX_TOOL_OUTPUT],
                             "receipt_id": f"hermesxp-{self.calls}-{call_id}"})
         return tuple(results)
@@ -310,8 +298,10 @@ class SocketAudio:
         # The XP sound card's microphone is physically close to its speaker.
         # Favor ignoring playback leakage while leaving room for a clearly
         # louder human interruption. Talk remains responsible for VAD itself.
-        self.echo_threshold = 0.08
-        self.echo_ratio = 1.4
+        self.echo_threshold = 0.12
+        self.echo_ratio = 1.8
+        self.suppressed_frames = 0
+        self.input_dropped_frames = 0
         self.write_lock = threading.Lock()
         self.threads = []
 
@@ -348,7 +338,7 @@ class SocketAudio:
                 with self.lock:
                     paused = self.paused
                     playing = self.queued_bytes > 0 or (
-                        time.monotonic() - self.output_at < 0.35
+                        time.monotonic() - self.output_at < ECHO_OUTPUT_HOLD_S
                     )
                     echo_level = self.output_level
                 if paused:
@@ -356,10 +346,15 @@ class SocketAudio:
                 if self.echo_gate and playing and rms(data) < max(
                     self.echo_threshold, echo_level * self.echo_ratio
                 ):
-                    continue
+                    # Substitute silence rather than skipping the frame.
+                    # Realtime VAD needs continuous sample timing: deleting
+                    # microphone frames can create spurious turn boundaries.
+                    data = bytes(len(data))
+                    self.suppressed_frames += 1
                 try:
                     self.input.put_nowait(data)
                 except queue.Full:
+                    self.input_dropped_frames += 1
                     # Realtime must prefer recent microphone samples to stale
                     # speech. Never block the network thread on a full queue.
                     try:

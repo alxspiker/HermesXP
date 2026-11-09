@@ -194,14 +194,14 @@ assert.equal(written[0].readUInt32BE(0),961);
 assert.equal(written[0][4],'I'.charCodeAt(0));
 assert.equal(written[0].length,965);
 assert.equal(pcmuToTalk(incoming).length,960);
-// A 0.5 second 24kHz signed stream becomes 0.5 seconds of 8kHz PCMU.
-const spoken=Buffer.alloc(24000);
+// A 1 second 24kHz signed stream becomes 1 second of 8kHz PCMU.
+const spoken=Buffer.alloc(48000);
 for(let i=0;i<spoken.length/2;i++) spoken.writeInt16LE(5000,i*2);
 const output=talkFrame('O',spoken);
 native.onTalkData(call,output.subarray(0,13));
 assert.equal(call.output.length,0);
 native.onTalkData(call,output.subarray(13));
-assert.equal(call.output.length,4000);
+assert.equal(call.output.length,8000);
 call.packetAt=performance.now()-10;
 for(let i=0;i<19;i++){
   native.tickTalkAudio(call);
@@ -244,14 +244,14 @@ call.output=Buffer.alloc(160*5,ulawEncode(9000));
 native.tickTalkAudio(call);
 assert.equal(parseRtp(outbound.at(-1))[0],0xff);
 assert.equal(call.output.length,800);
-// Once 400ms is buffered, the speech begins with an RTP marker bit.
-call.output=Buffer.alloc(160*25,ulawEncode(9000));
+// Once 800ms is buffered, the speech begins with an RTP marker bit.
+call.output=Buffer.alloc(160*45,ulawEncode(9000));
 call.lastOutputAt=performance.now();
 call.packetAt=performance.now()-10;
 native.tickTalkAudio(call);
-assert.equal(call.output.length,160*24);
+assert.equal(call.output.length,160*44);
 assert(outbound.at(-1)[1]&0x80);
-// Brief source underrun should NOT force another 400ms speech prebuffer.
+// Brief source underrun should NOT force another 800ms speech prebuffer.
 call.output=Buffer.alloc(0);
 call.packetAt=performance.now()-10;
 native.tickTalkAudio(call);

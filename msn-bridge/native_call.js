@@ -26,10 +26,10 @@ const RTP_PACKET_MS = 20;
 const RTP_SAMPLES_PER_PACKET = 160;
 const RTP_PREROLL_PACKETS = 4;
 // The host's Talk transport and Messenger RTP have independent clocks.
-// 400ms of preroll absorbs intermittent provider/OS thread scheduling while
-// keeping the voice path interactive. Short replies still flush via the
-// existing 250ms stale-tail rule.
-const RTP_SPEECH_START_BYTES = 20 * RTP_SAMPLES_PER_PACKET;
+// A real MSN call had 28 playout underflows despite zero LAN packet loss and
+// zero RTP clock skips. Prefer smoother playback: 800ms speech preroll.
+// Short replies still flush via the existing 250ms stale-tail rule.
+const RTP_SPEECH_START_BYTES = 40 * RTP_SAMPLES_PER_PACKET;
 const RTP_MAX_CATCHUP_MS = 30;
 
 function parseSip(data) {
@@ -602,7 +602,7 @@ class NativeCall {
       if (call.outSpeaking) {
         call.outputUnderflows = (call.outputUnderflows || 0) + 1;
         // A 20-100ms provider/OS gap is not the end of an utterance. If we
-        // reset on each missing frame, the new 400ms jitter-buffer preroll
+        // reset on each missing frame, the new 800ms jitter-buffer preroll
         // is paid REPEATEDLY mid-sentence: this is audible as chopped words.
         // Stay in the speech phase across short gaps; do not invent samples.
         if (!call.lastOutputAt || now - call.lastOutputAt > 550)

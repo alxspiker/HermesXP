@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Automatic address recovery (v0.7.1)
+### Automatic address recovery (v0.7.2)
 
 Once paired, HermesXP automatically recovers from a Windows XP device
 switching Ethernet/Wi-Fi or changing its DHCP-assigned local IP, **and**
@@ -19,8 +19,12 @@ relaunches Messenger to reconnect to the new server. Existing unrelated
 hosts entries are preserved. The modern MSN bridge reselects its IP-bound
 RTP listener based on the paired device's active LAN subnet; the discovery
 host also updates its managed MSN redirect/TLS binding configuration when
-the server address changes. This avoids hardcoded per-user IPs. It does not
-require SSH, an internet API, VPN, fixed DHCP leases, or re-pairing.
+the server address changes. If the existing local MSN certificate has an
+old IP SAN, the server reissues **only its TLS leaf** with the new IP under
+the **same existing CA and server private key**, so XP's existing trusted
+root remains valid. OpenSSL and the original CA/private key must still
+be available on the Hermes host. This avoids hardcoded per-user IPs. It
+does not require SSH, an internet API, VPN, fixed DHCP leases, or re-pairing.
 
 The Hermes server's LAN firewall must allow **UDP 18773 from RFC1918
 private networks**. The host updater will configure this scoped inbound
@@ -63,7 +67,7 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.1)
+### Native Messenger calls (v0.7.2)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP

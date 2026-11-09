@@ -1,10 +1,13 @@
 import copy
+import hashlib
+import subprocess
 import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
-from tools.lan_discovery import Discovery, identity, reconcile_host_ip, sign
+from tools.lan_discovery import (Discovery, identity, reconcile_host_ip,
+                                 reissue_host_leaf_if_needed, sign)
 
 
 TOKEN = "d" * 64
@@ -126,6 +129,40 @@ class TestAuthenticatedLanDiscovery(unittest.TestCase):
         self.handshake("192.168.5.22", host_ip="192.168.5.9")
         self.save.assert_not_called()
         self.restart.assert_called_once()
+
+    def test_tls_leaf_ip_san_rotates_under_same_ca_without_changing_private_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            certs = Path(tmp)
+            ca = certs / "ca.pem"
+            ca_key = certs / "ca-key.pem"
+            server_key = certs / "server-key.pem"
+            server = certs / "server.pem"
+            csr = certs / "old.csr"
+            ext = certs / "old.ext"
+            def run(*args):
+                subprocess.run(["openssl", *map(str, args)],
+                               check=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=18)
+            run("req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", ca_key, "-out", ca, "-days", "5",
+                "-subj", "/CN=HermesXP Test CA")
+            run("genrsa", "-out", server_key, "2048")
+            run("req", "-new", "-key", server_key,
+                "-subj", "/CN=192.168.1.81", "-out", csr)
+            ext.write_text("subjectAltName=IP:192.168.1.81,DNS:msn.local\n")
+            run("x509", "-req", "-in", csr, "-CA", ca, "-CAkey", ca_key,
+                "-CAcreateserial", "-extfile", ext, "-out", server)
+            before_ca = hashlib.sha256(ca.read_bytes()).hexdigest()
+            before_server_key = hashlib.sha256(server_key.read_bytes()).hexdigest()
+            self.assertTrue(reissue_host_leaf_if_needed(certs, "192.168.6.12"))
+            self.assertFalse(reissue_host_leaf_if_needed(certs, "192.168.6.12"))
+            san = subprocess.run(["openssl", "x509", "-in", str(server),
+                                  "-noout", "-ext", "subjectAltName"],
+                                 capture_output=True, text=True, check=True).stdout
+            self.assertIn("IP Address:192.168.6.12", san)
+            self.assertIn("DNS:msn.local", san)
+            self.assertEqual(hashlib.sha256(ca.read_bytes()).hexdigest(), before_ca)
+            self.assertEqual(hashlib.sha256(server_key.read_bytes()).hexdigest(), before_server_key)
 
 
 if __name__ == "__main__":

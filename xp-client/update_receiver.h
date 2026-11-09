@@ -7,6 +7,9 @@
 #define HXP_VERIFY_CONTEXT 0xF0000000u
 #define HXP_SHA256 0x0000800Cu
 #define HXP_HP_HASHVAL 2
+#define HXP_UPDATER_READY_EVENT "Local\\HermesXP.Updater.Ready"
+#define HXP_UPDATER_GO_EVENT "Local\\HermesXP.Updater.Go"
+#define HXP_ERROR_ALREADY_EXISTS 183
 
 typedef struct {
  DWORD cb;char *reserved,*desktop,*title;
@@ -97,17 +100,30 @@ static int update_parse_headers(const char *req,int header_end,DWORD *length,cha
  }
  return seen_len && seen_hash;
 }
-static int update_start_helper(const char *directory){
+static int update_start_helper(const char *directory,HANDLE *go_signal){
  char path[512];HXP_STARTUPINFO si;HXP_PROCESSINFO proc;
+ HANDLE ready,go;DWORD state;int ok=0;
  int i;unsigned char *p=(unsigned char*)&si,*q=(unsigned char*)&proc;
+ *go_signal=NULL;
+ ready=CreateEventA(NULL,1,0,HXP_UPDATER_READY_EVENT);
+ if(!ready)return 0;
+ if(GetLastError()==HXP_ERROR_ALREADY_EXISTS){CloseHandle(ready);return 0;}
+ go=CreateEventA(NULL,1,0,HXP_UPDATER_GO_EVENT);
+ if(!go){CloseHandle(ready);return 0;}
+ if(GetLastError()==HXP_ERROR_ALREADY_EXISTS){CloseHandle(go);CloseHandle(ready);return 0;}
  for(i=0;i<(int)sizeof(si);i++)p[i]=0;
  for(i=0;i<(int)sizeof(proc);i++)q[i]=0;
  join_path(path,directory,"HermesXP-Updater.exe");
- if(GetFileAttributesA(path)==INVALID_FILE_ATTRIBUTES)return 0;
+ if(GetFileAttributesA(path)==INVALID_FILE_ATTRIBUTES)goto cleanup;
  si.cb=sizeof(si);
- if(!CreateProcessA(path,NULL,NULL,NULL,0,0,NULL,NULL,&si,&proc))return 0;
+ if(!CreateProcessA(path,NULL,NULL,NULL,0,0,NULL,NULL,&si,&proc))goto cleanup;
+ state=WaitForSingleObject(ready,6000);
+ ok=state==0 && WaitForSingleObject(proc.process,0)!=0;
  CloseHandle(proc.thread);CloseHandle(proc.process);
- return 1;
+cleanup:
+ CloseHandle(ready);
+ if(!ok){CloseHandle(go);return 0;}
+ *go_signal=go;return 1;
 }
 /* A candidate must prove that Windows XP can actually load and initialize
    its UI before we close the running companion. This catches invalid PE
@@ -140,6 +156,7 @@ static int handle_update_stream(unsigned int sock,char *req,int used){
  char expected[65],actual[65],dir[512],pending[512],helper[512],previous[512];
  int head=http_header_end(req,used),remaining,first,ok=1;
  int is_helper=request_is(req,"POST","/update/helper");
+ HANDLE go_signal=NULL;
  unsigned char buffer[4096];DWORD length,got;HANDLE file;
  void *provider,*hash;
  if(head<=0 || !update_parse_headers(req,head,&length,expected)){
@@ -219,11 +236,17 @@ static int handle_update_stream(unsigned int sock,char *req,int used){
  }
  /* Start the helper BEFORE acknowledging success. It cannot rename the
     running image until we close the old GUI after this response is sent. */
- if(!update_start_helper(dir)){
+ if(!update_start_helper(dir,&go_signal)){
   DeleteFileA(pending);
-  send_http_text(sock,"503 Service Unavailable","cannot start rollback helper");
+  send_http_text(sock,"503 Service Unavailable","rollback helper failed readiness handshake");
   return 0;
  }
+ if(!SetEvent(go_signal)){
+  CloseHandle(go_signal);
+  send_http_text(sock,"503 Service Unavailable","rollback helper could not be released");
+  return 0;
+ }
+ CloseHandle(go_signal);
  send_http_text(sock,"200 OK","verified; restarting");
  Sleep(300);
  PostMessageA(g_main_window,WM_CLOSE,0,0);

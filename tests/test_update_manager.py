@@ -21,7 +21,7 @@ class UpdateManagerTests(unittest.TestCase):
                          (ROOT / "hermes-plugin/hermes-msn/adapter.py").read_bytes())
         self.assertEqual((ROOT / "__init__.py").read_bytes(),
                          (ROOT / "hermes-plugin/hermes-msn/__init__.py").read_bytes())
-        self.assertEqual(update_manager.plugin_version(ROOT), "0.3.0")
+        self.assertEqual(update_manager.plugin_version(ROOT), "0.3.1")
         self.assertEqual(len(update_manager.source_digest(ROOT)), 64)
 
     def test_release_manifest_contains_commit_and_digests(self):
@@ -30,9 +30,9 @@ class UpdateManagerTests(unittest.TestCase):
             for asset in release_assets.ASSETS:
                 (folder / asset).write_bytes((ROOT / "dist" / asset).read_bytes())
             commit = "a" * 40
-            manifest = release_assets.write_release_manifest(folder, "0.3.0", commit)
+            manifest = release_assets.write_release_manifest(folder, "0.3.1", commit)
             data = json.loads(manifest.read_text())
-            self.assertEqual(data["version"], "0.3.0")
+            self.assertEqual(data["version"], "0.3.1")
             self.assertEqual(data["commit"], commit)
             self.assertEqual(set(data["sha256"]), set(release_assets.ASSETS))
 
@@ -48,13 +48,13 @@ class UpdateManagerTests(unittest.TestCase):
 
         def get(url):
             if url.endswith("/manifest"):
-                return json.dumps({"commit": "c" * 40, "version": "0.3.0"}).encode()
-            if url.endswith("v0.3.0"):
+                return json.dumps({"commit": "c" * 40, "version": "0.3.1"}).encode()
+            if url.endswith("v0.3.1"):
                 return json.dumps({"assets": assets}).encode()
             raise AssertionError("Mismatched release should never download executables")
 
         with patch.object(release_assets, "_get", side_effect=get):
-            self.assertIsNone(release_assets.load_release("0.3.0", commit))
+            self.assertIsNone(release_assets.load_release("0.3.1", commit))
 
     def test_source_build_is_independent_of_git_checkout(self):
         with tempfile.TemporaryDirectory() as td:

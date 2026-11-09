@@ -1,7 +1,7 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.3.0
+version: 0.3.1
 description: "HermesXP full-source plugin: local MSN bridge/server installer, XP client and rollback helper, and authenticated LAN-only client updater. Windows XP never downloads from GitHub. Initial setup details are in after-install.md."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN

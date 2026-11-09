@@ -115,6 +115,74 @@ class XPUpdateTests(unittest.TestCase):
         self.assertIn('HermesXP.failed.exe', rollback)
         self.assertIn('MoveFileExA(backup,live', rollback)
 
+    def test_helper_readiness_handshake_precedes_client_shutdown(self):
+        gui = (ROOT / "xp-client/update_receiver.h").read_text()
+        helper = (ROOT / "xp-client/hermesxp-updater.c").read_text()
+        self.assertIn("HXP_UPDATER_READY_EVENT", gui)
+        self.assertIn("HXP_UPDATER_GO_EVENT", gui)
+        self.assertIn("OpenEventA", helper)
+        self.assertIn("SetEvent(ready_event)", helper)
+        self.assertIn("WaitForSingleObject(go_event,8000)", helper)
+        self.assertLess(gui.index("update_start_helper(dir,&go_signal)"),
+                        gui.index("PostMessageA(g_main_window,WM_CLOSE"))
+        self.assertLess(gui.index("SetEvent(go_signal)"),
+                        gui.index("PostMessageA(g_main_window,WM_CLOSE"))
+        self.assertIn("HermesXP-update.log", helper)
+        self.assertIn('trace("previous-image-restored",0)', helper)
+
+    def test_new_process_must_signal_its_own_listener(self):
+        gui = (ROOT / "xp-client/hermesxp.c").read_text()
+        helper = (ROOT / "xp-client/hermesxp-updater.c").read_text()
+        self.assertIn(r'"Local\\HermesXP.Updated.GuiReady"', gui)
+        self.assertIn(r'"Local\\HermesXP.Updated.GuiReady"', helper)
+        self.assertIn('g_update_activation', gui)
+        self.assertIn('OpenEventA(0x0002u,0,', gui)
+        self.assertIn('SetEvent(ready)', gui)
+        self.assertIn('WaitForSingleObject(gui_event,500)', helper)
+        self.assertIn('WaitForSingleObject(child.process,0)', helper)
+        self.assertIn(' /update-activation', helper)
+        self.assertLess(gui.index('if(listen(srv,5)!=0)'),
+                        gui.index('SetEvent(ready);CloseHandle(ready);'))
+        self.assertIn('OpenMutexA(SYNCHRONIZE,0,HXP_SINGLE_INSTANCE_MUTEX)',helper)
+        self.assertLess(helper.index('trace("old-gui-exited",0)'),
+                        helper.index('MoveFileExA(live,backup'))
+
+    def test_helper_handshake_prevents_stranding_old_gui(self):
+        receiver = (ROOT / "xp-client/update_receiver.h").read_text()
+        helper = (ROOT / "xp-client/hermesxp-updater.c").read_text()
+        self.assertIn('CreateEventA(NULL,1,0,HXP_UPDATER_READY_EVENT)', receiver)
+        self.assertIn('CreateEventA(NULL,1,0,HXP_UPDATER_GO_EVENT)', receiver)
+        self.assertIn('WaitForSingleObject(ready,6000)', receiver)
+        self.assertIn('WaitForSingleObject(proc.process,0)', receiver)
+        self.assertIn('SetEvent(go_signal)', receiver)
+        self.assertLess(receiver.index('SetEvent(go_signal)'),
+                        receiver.index('PostMessageA(g_main_window,WM_CLOSE'))
+        self.assertIn('OpenEventA(EVENT_MODIFY_STATE|SYNCHRONIZE', helper)
+        self.assertIn('SetEvent(ready_event)', helper)
+        self.assertIn('WaitForSingleObject(go_event,8000)', helper)
+        self.assertLess(helper.index('WaitForSingleObject(go_event,8000)'),
+                        helper.index('MoveFileExA(live,backup'))
+        self.assertIn('previous-image-restored', helper)
+        self.assertIn('previous-process-restarted', helper)
+
+    def test_xp_health_probe_is_bounded_and_checks_actual_child(self):
+        helper = (ROOT / "xp-client/hermesxp-updater.c").read_text()
+        self.assertIn('ioctlsocket(sock,HXP_FIONBIO,&nonblocking)', helper)
+        self.assertIn('deadline.tv_usec=200000', helper)
+        self.assertIn('select(0,NULL,&writable,NULL,&deadline)', helper)
+        self.assertIn('getsockopt(sock,HXP_SOL_SOCKET,HXP_SO_ERROR', helper)
+        self.assertIn('WaitForSingleObject(gui_event,500)', helper)
+        self.assertIn('WaitForSingleObject(child.process,0)!=WAIT_OBJECT_0 && ready()', helper)
+        self.assertIn('trace("new-process-failed-health",0)', helper)
+
+    def test_xp_gui_enforces_one_interactive_listener(self):
+        gui = (ROOT / "xp-client/hermesxp.c").read_text()
+        self.assertIn('CreateMutexA(NULL,0,"Local\\\\HermesXP.Companion.SingleInstance")', gui)
+        self.assertIn('if(!cl || !str_find(cl,"/update-selftest"))', gui)
+        self.assertIn('GetLastError()==183', gui)
+        self.assertLess(gui.index('CreateMutexA(NULL,0,'),
+                        gui.index('CreateThread(NULL,0,screenshot_server'))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -112,11 +112,16 @@ IMPORT BOOL WINAPI ReadFile(HANDLE,void *,DWORD,DWORD *,void *);
 IMPORT BOOL WINAPI WriteFile(HANDLE,const void *,DWORD,DWORD *,void *);
 IMPORT DWORD WINAPI GetFileSize(HANDLE,DWORD *);
 IMPORT BOOL WINAPI CloseHandle(HANDLE);
+IMPORT DWORD WINAPI GetLastError(void);
 IMPORT DWORD WINAPI WaitForSingleObject(HANDLE,DWORD);
 IMPORT void WINAPI Sleep(DWORD);
 IMPORT BOOL WINAPI CreateProcessA(const char *,char *,void *,void *,BOOL,DWORD,void *,const char *,void *,void *);
 IMPORT BOOL WINAPI GetExitCodeProcess(HANDLE,DWORD *);
 IMPORT BOOL WINAPI TerminateProcess(HANDLE,UINT);
+IMPORT HANDLE WINAPI CreateEventA(void *,BOOL,BOOL,const char *);
+IMPORT HANDLE WINAPI OpenEventA(DWORD,BOOL,const char *);
+IMPORT BOOL WINAPI SetEvent(HANDLE);
+IMPORT HANDLE WINAPI CreateMutexA(void *,BOOL,const char *);
 IMPORT UINT WINAPI GetWindowsDirectoryA(char *,UINT);
 IMPORT HANDLE WINAPI CreateThread(void *,DWORD,void *,void *,DWORD,DWORD *);
 IMPORT BOOL WINAPI CreateDirectoryA(const char *,void *);
@@ -192,6 +197,7 @@ IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
 #define DIB_RGB_COLORS 0
 
 static HINSTANCE g_instance; static HWND g_host, g_status, g_network_status, g_main_window;
+static int g_update_activation;
 static char g_remote_token[65], g_remote_allowed_ip[16];
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
 static void append_number(char *out,int *pos,unsigned int value){
@@ -960,6 +966,13 @@ static DWORD WINAPI screenshot_server(void *param){
   if(!ok){closesocket(srv);WSACleanup();return 1;}
  }
  if(listen(srv,5)!=0){ closesocket(srv); WSACleanup(); return 1; }
+ /* Only the newly activated GUI can signal this event, and only after its
+    own network listener is bound and accepting connections. The rollback
+    helper must not mistake the previous process's listener for the new one. */
+ if(g_update_activation){
+  HANDLE ready=OpenEventA(0x0002u,0,"Local\\HermesXP.Updated.GuiReady");
+  if(ready){SetEvent(ready);CloseHandle(ready);}
+ }
  for(;;){
   char req[1024]; int n,bodyLen; SOCKADDR_IN caddr; int clen=sizeof(caddr); DWORD timeout=3000;
   cli=accept(srv,&caddr,&clen);
@@ -1071,13 +1084,29 @@ static void load_remote_config(void){
  if(!g_remote_allowed_ip[0] || inet_addr(g_remote_allowed_ip)==0xFFFFFFFFUL)g_remote_allowed_ip[0]=0;
 }
 void WINAPI WinMainCRTStartup(void){
- WNDCLASSA c; MSG msg; HWND h; DWORD tid=0;
+ WNDCLASSA c; MSG msg; HWND h; DWORD tid=0; HANDLE single_instance=NULL;
  g_instance=GetModuleHandleA(NULL);
  load_remote_config();
+ {const char *cl=GetCommandLineA();
+  g_update_activation=cl && str_find(cl,"/update-activation")!=NULL;
+ }
  /* Command-line trigger: "HermesXP.exe /screenshot" captures the screen
     and exits without opening the window. */
  { const char *cl=GetCommandLineA();
    if(cl && str_find(cl,"/screenshot")){ take_screenshot(); ExitProcess(0); } }
+ /* Only one interactive instance may bind the authenticated listener.
+    Windows XP otherwise lets two GUI copies race on port 18768 (SO_REUSEADDR)
+    and an updater can mistake the wrong process for a successful restart.
+    The /update-selftest candidate deliberately bypasses the mutex. */
+ {const char *cl=GetCommandLineA();
+  if(!cl || !str_find(cl,"/update-selftest")){
+   single_instance=CreateMutexA(NULL,0,"Local\\HermesXP.Companion.SingleInstance");
+   if(!single_instance || GetLastError()==183){
+    if(single_instance)CloseHandle(single_instance);
+    ExitProcess(0);
+   }
+  }
+ }
  /* Initialize the interactive GUI before starting the optional listener. */
  c.style=0; c.lpfnWndProc=window_proc; c.cbClsExtra=0; c.cbWndExtra=0;
  c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;

@@ -35,3 +35,8 @@ EXPORTS
  _MoveFileExA@12=MoveFileExA
  _DeleteFileA@4=DeleteFileA
  _TerminateProcess@8=TerminateProcess
+ _CreateEventA@16=CreateEventA
+ _OpenEventA@12=OpenEventA
+ _SetEvent@4=SetEvent
+ _OpenMutexA@12=OpenMutexA
+ _CreateMutexA@12=CreateMutexA

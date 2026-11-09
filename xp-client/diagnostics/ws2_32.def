@@ -1,0 +1,12 @@
+LIBRARY WS2_32.dll
+EXPORTS
+ _WSAStartup@8=WSAStartup
+ _WSACleanup@0=WSACleanup
+ _socket@12=socket
+ _bind@12=bind
+ _closesocket@4=closesocket
+ _recv@16=recv
+ _setsockopt@20=setsockopt
+ _WSAIoctl@36=WSAIoctl
+ _inet_addr@4=inet_addr
+ _WSAGetLastError@0=WSAGetLastError

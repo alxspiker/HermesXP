@@ -67,7 +67,7 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.5)
+### Native Messenger calls (v0.7.6)
 
 **Native Call toolbar integration (v0.7.4).** When the paired owner presses
 the Call button in Windows Live Messenger, the MSN bridge receives WLM's

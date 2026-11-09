@@ -16,6 +16,8 @@ _ALLOWED_KEYS = frozenset((
     "Enter", "Tab", "Esc", "Backspace", "Delete",
     "Left", "Up", "Right", "Down",
 ))
+_SERVICE_ACTIONS = frozenset(("status", "start", "stop", "restart"))
+_SERVICE_NAME = re.compile(r"[A-Za-z0-9_.+$\-](?:[A-Za-z0-9_.+$ \-]{0,78}[A-Za-z0-9_.+$\-])?\Z")
 
 
 def validate_token(token: str) -> str:
@@ -47,6 +49,15 @@ def validate_key(key: str) -> bytes:
     if key not in _ALLOWED_KEYS:
         raise ValueError("Unsupported key name")
     return key.encode("ascii")
+
+
+def validate_service_command(name: str, action: str) -> bytes:
+    """Typed Windows SCM action; never interpreted as a shell command."""
+    if not isinstance(name, str) or not _SERVICE_NAME.fullmatch(name):
+        raise ValueError("Service name must be 1–80 safe ASCII characters")
+    if action not in _SERVICE_ACTIONS:
+        raise ValueError("Service action must be status, start, stop, or restart")
+    return f"action={action}&name={name}".encode("ascii")
 
 
 @dataclass
@@ -97,6 +108,11 @@ class HermesXPClient:
     def key(self, name: str) -> str:
         return self._request("POST", "/ui/key", validate_key(name)).decode("ascii", "replace")
 
+    def service(self, name: str, action: str = "status") -> str:
+        """Operate on any installed Windows service using SCM permissions."""
+        return self._request("POST", "/system/service",
+                             validate_service_command(name, action)).decode("ascii", "replace")
+
 
 def request(
     host: str, path: str, token: str, body: bytes = b"", *, port: int = 18768,
@@ -104,7 +120,8 @@ def request(
 ) -> tuple[str, bytes]:
     """Make an authenticated local control call, returning type and raw response."""
     client = HermesXPClient(host=host, token=token, port=port, timeout=timeout)
-    if path not in ("/ui/inspect", "/ui/click", "/ui/type", "/ui/key", "/screenshot.bmp"):
+    if path not in ("/ui/inspect", "/ui/click", "/ui/type", "/ui/key", "/screenshot.bmp",
+                    "/system/service"):
         raise ValueError("Unsupported endpoint")
     if not isinstance(body, bytes):
         raise ValueError("Request body must be bytes")

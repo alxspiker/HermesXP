@@ -51,12 +51,25 @@ typedef LRESULT (WINAPI *WNDPROC)(HWND,UINT,WPARAM,LPARAM);
 typedef struct { UINT style; WNDPROC lpfnWndProc; int cbClsExtra,cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; const char *lpszMenuName,*lpszClassName; } WNDCLASSA;
 typedef struct { short sin_family; unsigned short sin_port; unsigned long sin_addr; unsigned char sin_zero[8]; } SOCKADDR_IN;
 #include "remote_control.h"
+#include "service_control.h"
 /* Credential Manager (advapi32). CREDENTIALW is 48 bytes on 32-bit. */
 typedef struct { DWORD Flags; DWORD Type; unsigned short *TargetName; unsigned short *Comment; DWORD LastWrittenLow; DWORD LastWrittenHigh; DWORD CredentialBlobSize; unsigned char *CredentialBlob; DWORD Persist; DWORD AttributeCount; void *Attributes; unsigned short *TargetAlias; unsigned short *UserName; } CREDENTIALW;
 typedef struct { DWORD cbData; unsigned char *pbData; } CRYPT_HASH_BLOB;
 typedef struct _IP_ADDR_STRING { struct _IP_ADDR_STRING *Next; char IpAddress[16]; char IpMask[16]; DWORD Context; } IP_ADDR_STRING;
 typedef struct _IP_ADAPTER_INFO { struct _IP_ADAPTER_INFO *Next; DWORD ComboIndex; char AdapterName[260]; char Description[132]; UINT AddressLength; BYTE Address[8]; DWORD Index; UINT Type; UINT DhcpEnabled; void *CurrentIpAddress; IP_ADDR_STRING IpAddressList; IP_ADDR_STRING GatewayList; IP_ADDR_STRING DhcpServer; int HaveWins; IP_ADDR_STRING PrimaryWinsServer; IP_ADDR_STRING SecondaryWinsServer; long LeaseObtained; long LeaseExpires; } IP_ADAPTER_INFO;
 typedef struct { DWORD biSize; LONG biWidth; LONG biHeight; WORD biPlanes; WORD biBitCount; DWORD biCompression; DWORD biSizeImage; LONG biXPelsPerMeter; LONG biYPelsPerMeter; DWORD biClrUsed; DWORD biClrImportant; } BITMAPINFOHEADER;
+typedef struct { DWORD dwServiceType, dwCurrentState, dwControlsAccepted,
+  dwWin32ExitCode, dwServiceSpecificExitCode, dwCheckPoint, dwWaitHint;
+} XP_SERVICE_STATUS;
+#define SC_MANAGER_CONNECT 0x0001u
+#define XP_SERVICE_QUERY_STATUS 0x0004u
+#define XP_SERVICE_START 0x0010u
+#define XP_SERVICE_STOP 0x0020u
+#define XP_SERVICE_CONTROL_STOP 1u
+#define XP_SERVICE_STOPPED 1u
+#define XP_SERVICE_START_PENDING 2u
+#define XP_SERVICE_STOP_PENDING 3u
+#define XP_SERVICE_RUNNING 4u
 
 IMPORT HINSTANCE WINAPI GetModuleHandleA(const char *);
 IMPORT HINSTANCE WINAPI LoadLibraryA(const char *);
@@ -164,6 +177,12 @@ IMPORT BOOL WINAPI CryptCreateHash(void *,DWORD,void *,DWORD,void **);
 IMPORT BOOL WINAPI CryptHashData(void *,const unsigned char *,DWORD,DWORD);
 IMPORT BOOL WINAPI CryptGetHashParam(void *,DWORD,unsigned char *,DWORD *,DWORD);
 IMPORT BOOL WINAPI CryptDestroyHash(void *);
+IMPORT HANDLE WINAPI OpenSCManagerA(const char *,const char *,DWORD);
+IMPORT HANDLE WINAPI OpenServiceA(HANDLE,const char *,DWORD);
+IMPORT BOOL WINAPI QueryServiceStatus(HANDLE,XP_SERVICE_STATUS *);
+IMPORT BOOL WINAPI ControlService(HANDLE,DWORD,XP_SERVICE_STATUS *);
+IMPORT BOOL WINAPI StartServiceA(HANDLE,DWORD,const char **);
+IMPORT BOOL WINAPI CloseServiceHandle(HANDLE);
 
 /* Adapter info (iphlpapi) for the default-gateway check. */
 IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
@@ -897,6 +916,97 @@ static int request_is(const char *req,const char *method,const char *path){
  if(req[i++]!=' ')return 0;
  {int j=0;while(path[j]){if(req[i+j]!=path[j])return 0;j++;}return req[i+j]==' ';}
 }
+/* Generic Windows Service Control Manager support for any paired HermesXP
+   device. Exactly one service name/action is supplied; there is no shell or
+   arbitrary process execution behind this endpoint. Service permissions are
+   those of the HermesXP Windows user, not an escalation mechanism. */
+static const char *xp_service_state(DWORD value){
+ if(value==XP_SERVICE_STOPPED)return "stopped";
+ if(value==XP_SERVICE_START_PENDING)return "start_pending";
+ if(value==XP_SERVICE_STOP_PENDING)return "stop_pending";
+ if(value==XP_SERVICE_RUNNING)return "running";
+ return "unknown";
+}
+static void service_http_result(unsigned int sock,const char *status,
+                                const char *name,DWORD state,DWORD code){
+ char result[240]; const char *p; int n=0;
+ p="service=";while(*p && n<220)result[n++]=*p++;
+ p=name;while(*p && n<220)result[n++]=*p++;
+ p=" state=";while(*p && n<220)result[n++]=*p++;
+ p=xp_service_state(state);while(*p && n<220)result[n++]=*p++;
+ p=" win32_error=";while(*p && n<220)result[n++]=*p++;
+ append_number(result,&n,code);result[n]=0;
+ send_http_text(sock,status,result);
+}
+static const char *service_error_status(DWORD code){
+ if(code==5u)return "403 Forbidden";
+ if(code==1060u)return "404 Not Found";
+ if(code==1052u || code==1056u || code==1061u || code==1062u || code==1460u)
+  return "409 Conflict";
+ return "500 Internal Server Error";
+}
+static int do_remote_service(unsigned int sock,const char *req,int bodyLen){
+ int header,attempt;
+ HERMESXP_SERVICE_COMMAND command;
+ XP_SERVICE_STATUS current;
+ HANDLE manager=NULL,service=NULL;
+ DWORD error=0,access=XP_SERVICE_QUERY_STATUS;
+ const char *body;
+ if(!request_is(req,"POST","/system/service"))return 0;
+ header=http_header_end(req,strlen0(req));body=req+header;
+ if(!hermesxp_service_parse(body,bodyLen,&command)){
+  send_http_text(sock,"400 Bad Request","invalid service action or name");return 1;
+ }
+ if(command.action==HERMESXP_SERVICE_START)access|=XP_SERVICE_START;
+ if(command.action==HERMESXP_SERVICE_STOP)access|=XP_SERVICE_STOP;
+ if(command.action==HERMESXP_SERVICE_RESTART)access|=XP_SERVICE_STOP|XP_SERVICE_START;
+ manager=OpenSCManagerA(NULL,NULL,SC_MANAGER_CONNECT);
+ if(!manager){error=GetLastError();goto fail;}
+ service=OpenServiceA(manager,command.name,access);
+ if(!service){error=GetLastError();goto fail;}
+ if(!QueryServiceStatus(service,&current)){error=GetLastError();goto fail;}
+ if(command.action==HERMESXP_SERVICE_STOP ||
+    command.action==HERMESXP_SERVICE_RESTART){
+  if(current.dwCurrentState==XP_SERVICE_RUNNING){
+   if(!(current.dwControlsAccepted & XP_SERVICE_CONTROL_STOP)){
+    error=1052u;goto fail;
+   }
+   if(!ControlService(service,XP_SERVICE_CONTROL_STOP,&current)){
+    error=GetLastError();goto fail;
+   }
+  }
+  /* Windows services stop asynchronously. Bounded waiting avoids holding
+     the entire HermesXP HTTP listener hostage behind an unhealthy service. */
+  for(attempt=0;attempt<12;attempt++){
+   if(!QueryServiceStatus(service,&current)){error=GetLastError();goto fail;}
+   if(current.dwCurrentState==XP_SERVICE_STOPPED)break;
+   Sleep(200);
+  }
+  if(current.dwCurrentState!=XP_SERVICE_STOPPED){
+   error=1460u;goto fail; /* service stop is still pending */
+  }
+ }
+ if(command.action==HERMESXP_SERVICE_START ||
+    command.action==HERMESXP_SERVICE_RESTART){
+  if(current.dwCurrentState==XP_SERVICE_STOPPED){
+   if(!StartServiceA(service,0,NULL)){
+    error=GetLastError();goto fail;
+   }
+  }else if(current.dwCurrentState!=XP_SERVICE_RUNNING &&
+           current.dwCurrentState!=XP_SERVICE_START_PENDING){
+   error=1061u;goto fail;
+  }
+ }
+ if(!QueryServiceStatus(service,&current)){error=GetLastError();goto fail;}
+ service_http_result(sock,"200 OK",command.name,current.dwCurrentState,0);
+ CloseServiceHandle(service);CloseServiceHandle(manager);return 1;
+fail:
+ service_http_result(sock,service_error_status(error),
+                     command.name,0,error);
+ if(service)CloseServiceHandle(service);
+ if(manager)CloseServiceHandle(manager);
+ return 1;
+}
 #include "update_receiver.h"
 static void press_key(BYTE vk){ keybd_event(vk,0,0,NULL); keybd_event(vk,0,KEYEVENTF_KEYUP,NULL); }
 static int do_remote_ui(unsigned int sock,const char *req,int bodyLen){
@@ -1020,6 +1130,8 @@ static DWORD WINAPI screenshot_server(void *param){
        send_all(cli,nf,strlen0(nf));
       } }
     }
+   } else if(do_remote_service(cli,req,bodyLen)){
+    /* Completed through the authenticated, fixed-action service API. */
    } else if(!do_remote_ui(cli,req,bodyLen)){
     send_http_text(cli,"404 Not Found","unknown endpoint");
    }

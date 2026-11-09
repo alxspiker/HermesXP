@@ -1,6 +1,34 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.9)
+### Generic Windows XP service management (v0.7.0)
+
+HermesXP now manages **any installed Windows service by its SCM service name**,
+not a FreeSSHD-specific repair button. The paired Hermes host can query
+status, start, stop or restart services through XP's Service Control Manager.
+The authenticated endpoint is POST /system/service with a canonical body such
+as action=status&name=AudioSrv or action=restart&name=Spooler. It does not
+accept arbitrary shell commands, executable paths, service installations,
+or configuration changes.
+
+From a Hermes host with a paired device in the private registry:
+
+    python3 -m tools.hermesxp_services --device XP-Lab --service AudioSrv status
+    python3 -m tools.hermesxp_services --device XP-Lab --service Spooler restart
+
+The client reads the pairing token from the protected device registry.
+The XP endpoint uses the same exact trusted-source-IPv4 check and 64-digit
+hex pairing token as the screenshot and remote UI routes, strictly parses
+the service name and action, and uses the logged-in Windows account's
+existing SCM permissions. Responses report the service state and Windows
+error code (e.g., service missing, access denied or operation pending).
+Service shutdown is bounded to ~2.4 seconds to avoid hanging the HermesXP
+listener when a Windows service is stuck. Restarting services can disrupt
+connected clients; Hermes must authorize the requested action.
+
+As with the existing remote UI, service management uses **plaintext HTTP on
+the trusted LAN**. Do not expose it to untrusted machines or the internet.
+
+### Native Messenger calls (v0.7.0)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP

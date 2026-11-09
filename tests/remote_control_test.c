@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <string.h>
 #include "../xp-client/remote_control.h"
+#include "../xp-client/service_control.h"
 
 int main(void) {
     const char *token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -49,5 +50,27 @@ int main(void) {
     assert(hermesxp_remote_key_code("Enter") == 0x0D);
     assert(hermesxp_remote_key_code("Left") == 0x25);
     assert(hermesxp_remote_key_code("Win") == 0);
+    char svc_request[256];
+    strcpy(svc_request, "POST /system/service HTTP/1.0\r\nX-Hermes-Token: ");
+    strcat(svc_request, token);
+    strcat(svc_request, "\r\nContent-Length: 34\r\n\r\naction=restart&name=FreeSSHDService");
+    assert(hermesxp_remote_authorized(svc_request, token));
+    svc_request[0]='G';
+    assert(!hermesxp_remote_authorized(svc_request, token));
+    HERMESXP_SERVICE_COMMAND cmd;
+    assert(hermesxp_service_parse("action=status&name=AudioSrv", strlen("action=status&name=AudioSrv"), &cmd));
+    assert(cmd.action == HERMESXP_SERVICE_STATUS && strcmp(cmd.name, "AudioSrv")==0);
+    assert(hermesxp_service_parse("action=restart&name=FreeSSHDService", strlen("action=restart&name=FreeSSHDService"), &cmd));
+    assert(cmd.action == HERMESXP_SERVICE_RESTART && strcmp(cmd.name, "FreeSSHDService")==0);
+    assert(hermesxp_service_parse("action=stop&name=SQL Server", strlen("action=stop&name=SQL Server"), &cmd));
+    assert(cmd.action == HERMESXP_SERVICE_STOP);
+    assert(hermesxp_service_parse("action=start&name=MSSQL$SQLEXPRESS", strlen("action=start&name=MSSQL$SQLEXPRESS"), &cmd));
+    assert(cmd.action == HERMESXP_SERVICE_START);
+    assert(!hermesxp_service_parse("action=delete&name=AudioSrv", strlen("action=delete&name=AudioSrv"), &cmd));
+    assert(!hermesxp_service_parse("action=restart&name=AudioSrv&extra=1", strlen("action=restart&name=AudioSrv&extra=1"), &cmd));
+    assert(!hermesxp_service_parse("action=start&name=a/b", strlen("action=start&name=a/b"), &cmd));
+    assert(!hermesxp_service_parse("action=start&name= A", strlen("action=start&name= A"), &cmd));
+    assert(!hermesxp_service_parse("action=start&name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                   strlen("action=start&name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), &cmd));
     return 0;
 }

@@ -11,3 +11,9 @@ EXPORTS
  _CryptHashData@16=CryptHashData
  _CryptGetHashParam@20=CryptGetHashParam
  _CryptDestroyHash@4=CryptDestroyHash
+ _OpenSCManagerA@12=OpenSCManagerA
+ _OpenServiceA@12=OpenServiceA
+ _QueryServiceStatus@8=QueryServiceStatus
+ _ControlService@12=ControlService
+ _StartServiceA@12=StartServiceA
+ _CloseServiceHandle@4=CloseServiceHandle

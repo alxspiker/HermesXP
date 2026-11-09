@@ -225,7 +225,7 @@ def host_leaf_matches_ip(cert_file: Path, host_ip: str) -> bool:
         ).stdout
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
-    sans = {item.strip() for item in output.replace("\n", " ").split(",")}
+    sans = set(re.findall(r"(?:IP Address:[0-9.]+|DNS:[A-Za-z0-9._-]+)", output))
     return f"IP Address:{host_ip}" in sans and "DNS:msn.local" in sans
 
 

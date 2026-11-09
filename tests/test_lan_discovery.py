@@ -6,8 +6,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
 
-from tools.lan_discovery import (Discovery, identity, reconcile_host_ip,
-                                 reissue_host_leaf_if_needed, sign)
+from tools.lan_discovery import (Discovery, host_leaf_matches_ip, identity,
+                                 reconcile_host_ip, reissue_host_leaf_if_needed, sign)
 
 
 TOKEN = "d" * 64
@@ -156,6 +156,8 @@ class TestAuthenticatedLanDiscovery(unittest.TestCase):
             before_server_key = hashlib.sha256(server_key.read_bytes()).hexdigest()
             self.assertTrue(reissue_host_leaf_if_needed(certs, "192.168.6.12"))
             self.assertFalse(reissue_host_leaf_if_needed(certs, "192.168.6.12"))
+            self.assertTrue(host_leaf_matches_ip(server, "192.168.6.12"))
+            self.assertFalse(host_leaf_matches_ip(server, "192.168.6.1"))
             san = subprocess.run(["openssl", "x509", "-in", str(server),
                                   "-noout", "-ext", "subjectAltName"],
                                  capture_output=True, text=True, check=True).stdout
@@ -163,6 +165,29 @@ class TestAuthenticatedLanDiscovery(unittest.TestCase):
             self.assertIn("DNS:msn.local", san)
             self.assertEqual(hashlib.sha256(ca.read_bytes()).hexdigest(), before_ca)
             self.assertEqual(hashlib.sha256(server_key.read_bytes()).hexdigest(), before_server_key)
+
+    def test_cert_renewal_failure_does_not_migrate_host_endpoints(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            root = home / ".hermes" / "msn-server"
+            certs = root / "certs"
+            certs.mkdir(parents=True)
+            (certs / "server.pem").write_text("invalid certificate")
+            settings = root / "settings_local.py"
+            settings.write_text("TARGET_HOST = '192.168.1.81'\n")
+            tls = root / "stunnel.conf"
+            tls.write_text("[msn]\naccept = 192.168.1.81:443\n")
+            # Patch only service restarts. OpenSSL's subprocess.run itself
+            # needs Popen, so a blanket mock would corrupt certificate tests.
+            real_popen = subprocess.Popen
+            def forbid_restart(args, *other, **kwargs):
+                if args and args[0] == "systemctl":
+                    raise AssertionError("must not restart services with invalid TLS")
+                return real_popen(args, *other, **kwargs)
+            with patch("tools.lan_discovery.subprocess.Popen", side_effect=forbid_restart):
+                self.assertFalse(reconcile_host_ip("192.168.4.55", home=home))
+            self.assertIn("192.168.1.81", settings.read_text())
+            self.assertIn("192.168.1.81", tls.read_text())
 
 
 if __name__ == "__main__":

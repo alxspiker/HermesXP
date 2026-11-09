@@ -21,7 +21,7 @@ class UpdateManagerTests(unittest.TestCase):
                          (ROOT / "hermes-plugin/hermes-msn/adapter.py").read_bytes())
         self.assertEqual((ROOT / "__init__.py").read_bytes(),
                          (ROOT / "hermes-plugin/hermes-msn/__init__.py").read_bytes())
-        self.assertEqual(update_manager.plugin_version(ROOT), "0.7.6")
+        self.assertEqual(update_manager.plugin_version(ROOT), "0.7.7")
         self.assertEqual(len(update_manager.source_digest(ROOT)), 64)
 
     def test_release_manifest_contains_commit_and_digests(self):

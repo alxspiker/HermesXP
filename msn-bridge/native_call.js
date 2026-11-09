@@ -23,6 +23,8 @@ const MAX_CALL_MS = 30 * 60 * 1000;
 // for 30 minutes. The long lifetime applies only after a 200 OK is accepted.
 const OUTGOING_SETUP_TIMEOUT_MS = 20 * 1000;
 const TALK_BRIDGE_PORT = 18771;
+const TALK_RECONNECT_MIN_MS = 500;
+const TALK_RECONNECT_MAX_MS = 10000;
 const TALK_MAX_FRAME = 256 * 1024;
 const TALK_MAX_PENDING = 256 * 1024;
 const RTP_PACKET_MS = 20;
@@ -37,7 +39,10 @@ const RTP_MAX_CATCHUP_MS = 30;
 // WLM sends its type-11 media rendezvous request when its Call toolbar is
 // clicked, but may also send one immediately after a call ends. Never redial
 // on that trailing event or on duplicate preflight requests.
-const WLM_OUTGOING_REPLY_MS = 300;
+// Let WLM's original Computer Call send its SIP INVITE before offering our
+// reciprocal fallback. With only 300ms, the fallback could race WLM's
+// outbound INVITE and force a 486 Busy response to the original attempt.
+const WLM_OUTGOING_REPLY_MS = 2500;
 const WLM_POST_HANGUP_GUARD_MS = 4000;
 const WLM_RENDEZVOUS_DEBOUNCE_MS = 3000;
 
@@ -239,6 +244,7 @@ class NativeCall {
     if (old?.expiry) clearTimeout(old.expiry);
     if (old?.audioTimer) clearTimeout(old.audioTimer);
     if (old?.statsTimer) clearInterval(old.statsTimer);
+    if (old?.talkReconnectTimer) clearTimeout(old.talkReconnectTimer);
     if (old?.talk) {
       this.logCallStats(old, 'final');
     }
@@ -444,6 +450,13 @@ class NativeCall {
         answer(486, 'Busy Here');
         return;
       }
+      // When WLM reaches its actual SIP outgoing-call negotiation, cancel
+      // the pending reciprocal workaround. This is the preferred native
+      // Computer Call path, with a single call ID and no Accept-again step.
+      if (this.rendezvousTimer) {
+        clearTimeout(this.rendezvousTimer);
+        this.rendezvousTimer = null;
+      }
       const offer = parseSdp(sip.body);
       // This project is LAN-only. Reject a different or public RTP address
       // rather than sending audio to an untrusted network endpoint.
@@ -531,6 +544,7 @@ class NativeCall {
     call.interruptions = 0;
     call.resetsDuringSpeech = 0;
     call.discardedPcmMs = 0;
+    call.talkReconnects = 0;
     this.scheduleTalkAudio(call);
     // WLM 2009 does not always deliver SIP BYE when its call window closes.
     // Periodic content-free stats remain available even if the call outlives
@@ -539,6 +553,15 @@ class NativeCall {
       if (this.call === call && call.rtpSeen)
         this.logCallStats(call);
     }, 12000);
+    this.connectTalk(call);
+  }
+  connectTalk(call) {
+    if (this.call !== call || call.talk || call.talkReconnectTimer) return;
+    // The native SIP/RTP call belongs to Messenger. Talk is an independent
+    // service and can fail/reconnect without implicitly sending SIP BYE.
+    call.talkReady = false;
+    call.talkIncoming = Buffer.alloc(0);
+    call.talkRemainder = Buffer.alloc(0);
     const connection = net.connect({host: '127.0.0.1', port: TALK_BRIDGE_PORT});
     call.talk = connection;
     connection.on('connect', () => {
@@ -551,12 +574,29 @@ class NativeCall {
         this.logger.warn('Hermes Talk audio bridge unavailable:', error.code || error.message);
     });
     connection.on('close', () => {
-      if (this.call === call) {
-        this.logger.warn('Hermes Talk audio session closed; ending MSN call');
-        this.hangup();
-      }
+      if (this.call !== call || call.talk !== connection) return;
+      call.talk = null;
+      call.talkReady = false;
+      // Flush a partial old response, but keep the ongoing RTP scheduler
+      // and stats timer alive. Quiet PCMU frames maintain the media path
+      // until Talk resumes; no phantom duplicate voice is replayed.
+      call.output = Buffer.alloc(0);
+      call.talkRemainder = Buffer.alloc(0);
+      call.outSpeaking = false;
+      const retries = call.talkReconnects || 0;
+      const delay = Math.min(TALK_RECONNECT_MAX_MS,
+                             TALK_RECONNECT_MIN_MS * 2 ** Math.min(retries, 5));
+      call.talkReconnects = retries + 1;
+      if (retries === 0 || retries % 6 === 0)
+        this.logger.warn('Hermes Talk disconnected; keeping Messenger call alive; ' +
+                         'audio reconnect scheduled in %dms (attempt %d)',
+                         delay, retries + 1);
+      call.talkReconnectTimer = setTimeout(() => {
+        call.talkReconnectTimer = null;
+        if (this.call === call && !call.talk) this.connectTalk(call);
+      }, delay);
     });
-    this.logger.info('Starting MSN audio through Hermes Talk plugin');
+    this.logger.info('Connecting MSN audio through Hermes Talk plugin');
   }
   onTalkData(call, chunk) {
     if (this.call !== call) return;
@@ -573,6 +613,10 @@ class NativeCall {
       call.talkIncoming = call.talkIncoming.subarray(4 + len);
       if (type === 'R') {
         call.talkReady = true;
+        if (call.talkReconnects) {
+          this.logger.info('Hermes Talk recovered; native Messenger call continued');
+          call.talkReconnects = 0;
+        }
         this.logger.info('Hermes Talk PCM bridge ready');
       } else if (type === 'D') {
         // Hermes Talk owns interruption/truncation decisions.

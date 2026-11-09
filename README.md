@@ -67,18 +67,38 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.6)
+### Native Messenger calls (v0.7.7)
 
 **Native Call toolbar integration (v0.7.4).** When the paired owner presses
 the Call button in Windows Live Messenger, the MSN bridge receives WLM's
 type-11 rendezvous metadata. It authenticates the sender, sends WLM's
 capability reply and initiates a native, reciprocal SIP invitation through
 the same G.711 RTP/Hermes Talk session used by /nativecall. The delay is
-300 ms, not 650 ms; duplicate requests and post-hangup negotiation frames
+2.5 seconds to allow Messenger's original outgoing SIP INVITE; duplicate
+requests and post-hangup negotiation frames
 are suppressed to prevent a new call starting after the End Call button.
 Messenger's native End Call button is handled via the tunneled SIP BYE.
 Unanswered reciprocal invitations now expire after 20 seconds rather than
 blocking the next call attempt for the entire 30-minute maximum call duration.
+
+**Original outgoing Computer Call precedence (v0.7.7).** WLM's type-11
+bootstrap/rendezvous message is not itself an audio SIP offer. Hermes now
+waits 2.5 seconds for an original WLM SIP INVITE before resorting to its
+reciprocal invitation. If WLM sends the original INVITE, the fallback is
+cancelled and a single WLM-originated SIP call is negotiated. This cannot
+make the separate MSNP2P *Video Call* protocol work; WLM 2009 may default
+its large toolbar button to Video Call rather than Call Computer. Select
+the **audio-only Call Computer** action in Messenger's Call menu when
+testing the original SIP setup. A live successful outgoing SIP offer has
+not yet been observed; don't treat a reciprocal invitation as proof.
+
+**Talk session recovery (v0.7.7).** A Talk provider failure (e.g.
+provider_receiver=failed:QueueFull) no longer ends a healthy MSN SIP/RTP
+call. The bridge sends quiet G.711 while it reconnects the authenticated
+Talk TCP leg with bounded exponential backoff (0.5–10s). On successful
+reconnect, the conversational provider may have lost its previous context,
+but the native Messenger call window stays connected. Explicit WLM End
+Call, Hermes /hangup, and call timeout still close the call normally.
 
 **Limit:** The legacy MSN service does not implement WLM 2009's original
 outgoing VOIP control plane (historically 0x80EE00C8). Therefore the Call

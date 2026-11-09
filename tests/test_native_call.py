@@ -167,10 +167,10 @@ try {
  n.onSignal(rendezvous);
  assert.equal(sent.length,1);
  assert.equal(sent[0].payload.toString(),'2 3 5 234889141 0 3 0');
- assert(timers.some(t=>t.delay===300));
+ assert(timers.some(t=>t.delay===2500));
  n.onSignal(rendezvous);
  assert.equal(sent.length,1,'duplicate button events must not generate duplicate SIP invites');
- const ready=timers.find(t=>t.delay===300);
+ const ready=timers.find(t=>t.delay===2500);
  ready.fn();
  assert.equal(sent.length,2);
  const offer=decodeNativeSignal(12,sent[1].payload);
@@ -190,7 +190,7 @@ try {
  n.lastCallEndedAt=Date.now()-5000;
  n.onSignal(rendezvous);
  assert.equal(sent.length,4);
- const again=timers.filter(t=>t.delay===300).at(-1);
+ const again=timers.filter(t=>t.delay===2500).at(-1);
  again.fn();
  assert.equal(sent.length,5);
  assert(n.call);
@@ -258,6 +258,114 @@ try {
 }finally {
  n.stop();global.setTimeout=priorSet;global.clearTimeout=priorClear;
 }
+""")
+
+    def test_talk_failure_reconnects_without_hanging_up_messenger(self):
+        self.run_js(r"""
+const assert=require('assert');
+const net=require('net');
+const {EventEmitter}=require('events');
+const {NativeCall}=require('./native_call.js');
+const originalConnect=net.connect,originalTimeout=global.setTimeout;
+const originalClear=global.clearTimeout,originalInterval=global.setInterval;
+const originalClearInterval=global.clearInterval;
+const timers=[],connections=[],sent=[];
+global.setTimeout=(fn,delay)=>{const t={fn,delay,cancelled:false};timers.push(t);return t;};
+global.clearTimeout=t=>{if(t)t.cancelled=true;};
+global.setInterval=(fn,delay)=>({fn,delay});
+global.clearInterval=()=>{};
+net.connect=()=>{const conn=new EventEmitter();
+ conn.destroyed=false;
+ conn.writableLength=0;
+ conn.write=()=>{};
+ conn.destroy=()=>{conn.destroyed=true;conn.emit('close');};
+ connections.push(conn);return conn;};
+const n=new NativeCall({
+ client:{email:'bot@hermes.local',
+ sendNativeSignal:(to,type,payload)=>sent.push(type)},
+ owner:'owner@hermes.local',host:'192.168.1.81',
+ xpHost:'192.168.1.84',token:'a'.repeat(64),
+ logger:{info(){},warn(){},error(){}}
+});
+const call={
+ remote:{ip:'192.168.1.84',port:12221},seq:0,stamp:0,ssrc:10,
+ id:'call-123',output:Buffer.alloc(0),
+};
+try{
+ n.call=call;
+ n.startTalk(call);
+ assert.equal(connections.length,1);
+ connections[0].emit('connect');
+ const ready=Buffer.from([0,0,0,1,82]); // Talk frame: R
+ connections[0].emit('data',ready);
+ assert.equal(call.talkReady,true);
+ call.output=Buffer.alloc(160,0x31);
+ connections[0].emit('close');
+ assert.equal(n.call,call,'Talk failure must not terminate SIP call');
+ assert.equal(call.talkReady,false);
+ assert.equal(call.output.length,0,'discard stale provider audio');
+ assert.equal(sent.length,0,'never issue a SIP BYE for a Talk interruption');
+ assert.equal(call.talk,null);
+ const retry=timers.find(t=>t.delay===500);
+ assert(retry);
+ retry.fn();
+ assert.equal(connections.length,2,'reconnect within same WLM SIP call');
+ connections[1].emit('data',ready);
+ assert.equal(call.talkReady,true);
+ assert.equal(call.talkReconnects,0,'clear exponential backoff after recovery');
+ assert.equal(n.call,call);
+ // End Call cancels the media reconnect and destroys the connection.
+ n.hangup();
+ assert.equal(n.call,null);
+ assert.equal(connections[1].destroyed,true);
+ assert.equal(sent.length,1,'explicit hangup still sends SIP BYE');
+}finally{
+ n.stop();
+ net.connect=originalConnect;
+ global.setTimeout=originalTimeout;global.clearTimeout=originalClear;
+ global.setInterval=originalInterval;global.clearInterval=originalClearInterval;
+}
+""")
+
+    def test_original_wlm_outgoing_sip_preempts_reciprocal_fallback(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {NativeCall,encodeNativeSignal,decodeNativeSignal}=require('./native_call.js');
+const saved=[],sent=[];
+const oldSet=global.setTimeout,oldClear=global.clearTimeout;
+global.setTimeout=(fn,delay)=>{const entry={fn,delay,cleared:false};saved.push(entry);return entry;};
+global.clearTimeout=entry=>{if(entry)entry.cleared=true;};
+const n=new NativeCall({
+ client:{email:'bot@hermes.local',sendNativeSignal:(to,type,payload)=>
+   sent.push({type,payload})},
+ owner:'owner@hermes.local',host:'192.168.1.81',xpHost:'192.168.1.84',
+ token:'a'.repeat(64),logger:{info(){},warn(){},error(){}}
+});
+try{
+ n.onSignal({sender:'owner@hermes.local',type:11,
+   payload:Buffer.from('1 3 7 234889141 0 3 0')});
+ const fallback=saved.find(t=>t.delay===2500);
+ assert(fallback,'allow 2.5 seconds for original Computer Call SIP');
+ const sdp='v=0\r\nc=IN IP4 192.168.1.84\r\nm=audio 33555 RTP/AVP 0\r\n';
+ const sip=[
+ 'INVITE sip:bot@hermes.local SIP/2.0',
+ 'Via: SIP/2.0/UDP 192.168.1.84:5060',
+ 'From: <sip:owner@hermes.local>;tag=original',
+ 'To: <sip:bot@hermes.local>',
+ 'Call-ID: original-call-1','CSeq: 1 INVITE',
+ 'Content-Type: application/sdp',
+ 'Content-Length: '+Buffer.byteLength(sdp),'',sdp,
+ ].join('\r\n');
+ n.onSignal({sender:'owner@hermes.local',type:12,
+   payload:encodeNativeSignal('original-call-1',Buffer.from(sip))});
+ assert(fallback.cleared,'WLM original SIP INVITE takes priority');
+ assert.equal(n.call.id,'original-call-1');
+ assert.equal(n.call.initiated,undefined,'one native outbound call, no Hermes reciprocal call');
+ assert(decodeNativeSignal(sent[1].type,sent[1].payload).sip.toString().startsWith('SIP/2.0 200 OK'));
+ fallback.fn();
+ assert.equal(sent.length,2,'late fallback cannot generate a second SIP INVITE');
+ n.closeCall();
+}finally{n.stop();global.setTimeout=oldSet;global.clearTimeout=oldClear;}
 """)
 
     def test_pcmu_rtp_conversions(self):

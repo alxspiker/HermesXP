@@ -116,7 +116,7 @@ sed -e "s|__HOME__|$HOME|g" -e "s|__NODE_BIN__|$NODE_BIN|g" -e "s|__SCRIPT_DIR__
 
 # bridge files (patched msnclient + bridge.js) live under ~/.hermes/msn-bridge
 mkdir -p "$BRIDGE_DIR"
-cp -r "$BRIDGE_SRC/bridge.js" "$BRIDGE_SRC/package.json" "$BRIDGE_SRC/msnclient" "$BRIDGE_DIR/"
+cp -r "$BRIDGE_SRC/bridge.js" "$BRIDGE_SRC/native_call.js" "$BRIDGE_SRC/package.json" "$BRIDGE_SRC/msnclient" "$BRIDGE_DIR/"
 NPM_BIN="$(command -v npm || echo "$(dirname "$NODE_BIN")/npm")"
 log "installing bridge dependencies with $NPM_BIN..."
 # The Hermes-bundled npm invokes `node` from PATH, so put the node dir first.

@@ -1,5 +1,6 @@
 var net = require('net');
 var msnsocket = require('./MSNHelper.js');
+const { MSNPFrameDecoder } = require('./frame.js');
 const axios = require('axios');
 const https = require('https');
 const EventEmitter = require('events');
@@ -16,6 +17,13 @@ const MSN_LOGIN_URL = process.env.MSN_LOGIN_URL || 'https://msnmsgr.escargot.cha
 // MSN_LOGIN_INSECURE=1: accept a self-signed/local-CA cert on an https login
 // URL (only for a local server; never for Escargot).
 const MSN_LOGIN_INSECURE = process.env.MSN_LOGIN_INSECURE === '1';
+const MSN_PROTOCOL = process.env.MSN_BOT_PROTOCOL === '13' ? 'MSNP13' : 'MSNP9';
+// MSNP13 is required for UUN / UBN (tunneled SIP); default remains MSNP9
+// until the native-call feature is explicitly enabled and verified.
+const MSN_NATIVE_CALL = MSN_PROTOCOL === 'MSNP13';
+// MSNC4 + SIP invites + tunneled SIP. Never advertise codecs unsupported by
+// the actual call engine. WLM 2009 may require MSNP16 SSO capabilities.
+const MSN_NATIVE_CAPS = 0x40300000;
 
 const endTag = "\r\n";
 
@@ -34,21 +42,34 @@ class MSNClient extends EventEmitter  {
 		this.active = false;
 
 		this.switchboard = [];
+		this.frameDecoder = new MSNPFrameDecoder();
 	}
 
 	execute() {
 		this.client.connect(1863, MSN_SERVER_HOST, () => {
 			console.log('[DEBUG] Connected to MSN Server');
-			this.client.write('VER 0 MSNP9 CVR0' + endTag);
+			this.client.write('VER 0 ' + MSN_PROTOCOL + ' CVR0' + endTag);
 		});
 
 		this.client.on('data', async data => {
 			this.TrID++;
-			let parsed = msnsocket.parseMessage(data);
-			console.log(parsed);
+			let frames;
+			try { frames = this.frameDecoder.feed(data); }
+			catch (err) { this.emit('error', err); this.client.destroy(); return; }
+			let parsed = frames.map(frame => frame.words);
+			// Do not print UBN SIP/SDP payloads (which may contain IP addresses).
+			if (process.env.MSN_DEBUG === '1') console.log(parsed);
+			for (const frame of frames) {
+			  if (frame.command === 'UBN' && frame.words.length >= 4) {
+			    const sender = frame.words[1].split(';')[0].trim().toLowerCase();
+			    this.emit('native_signal', {
+			      sender, type: Number(frame.words[2]), payload: frame.body,
+			    });
+			  }
+			}
 			if(parsed != undefined) {
 				parsed.forEach(async element => {
-					if(element[0] == 'VER' && element[2] == 'MSNP9') {
+					if(element[0] == 'VER' && element[2] == MSN_PROTOCOL) {
 						console.log('[DEBUG] System info sent')
 						this.client.write('CVR 2 0x0409 '+process.platform+' '+os.version+' '+process.arch+' NODEMSN 5.0.0544 MSMSGS ' + this.login + endTag);
 					}
@@ -80,7 +101,7 @@ class MSNClient extends EventEmitter  {
 							})
 							.catch(err => console.log('error ', this.emit(err)));
 						this.client.write('USR 4 TWN S ' + this.token + endTag);
-						this.client.write('CHG 5 NLN 0' + endTag);
+						this.client.write('CHG 5 NLN ' + (MSN_NATIVE_CALL ? MSN_NATIVE_CAPS : 0) + endTag);
 						this.TrID = 6;
 						this.active = true;
 					}
@@ -150,6 +171,21 @@ class MSNClient extends EventEmitter  {
 		return {'active': this.active,
 				'email': this.email,
 				'name': this.name};
+	}
+
+	sendNativeSignal(recipient, type, payload) {
+		if (!MSN_NATIVE_CALL || !this.active || !this.email)
+			throw new Error('MSNP13 native signaling is not connected');
+		if (!/^[a-z0-9_.+\-]+@[a-z0-9.\-]+$/i.test(recipient))
+			throw new Error('Invalid native signaling recipient');
+		if (!Number.isInteger(type) || type < 0 || type > 16)
+			throw new Error('Invalid UUN type');
+		if (!Buffer.isBuffer(payload) || !payload.length || payload.length > 16384)
+			throw new Error('Native signaling payload exceeds 16 KiB');
+		this.TrID++;
+		const header = Buffer.from('UUN ' + this.TrID + ' ' + recipient + ' ' + type +
+		                           ' ' + payload.length + '\r\n');
+		this.client.write(Buffer.concat([header, payload]));
 	}
 	
 	async sendMessage(emailArg, bodyArg) {

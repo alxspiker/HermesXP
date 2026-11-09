@@ -30,6 +30,14 @@ if [ "$REVISION" != "$CURRENT" ]; then
     cp "$REPO/msn-bridge/bridge.js" "$BRIDGE_LIVE.tmp"
     chmod 644 "$BRIDGE_LIVE.tmp"
     mv -f "$BRIDGE_LIVE.tmp" "$BRIDGE_LIVE"
+    # Native signaling requires both the UUN frame decoder and SIP/RTP
+    # implementation. Update all atomically BEFORE the Node bridge restarts.
+    cp "$REPO/msn-bridge/native_call.js" "$HERMES_HOME/msn-bridge/native_call.js.tmp"
+    mv -f "$HERMES_HOME/msn-bridge/native_call.js.tmp" "$HERMES_HOME/msn-bridge/native_call.js"
+    cp "$REPO/msn-bridge/msnclient/frame.js" "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp"
+    mv -f "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/frame.js"
+    cp "$REPO/msn-bridge/msnclient/main.js" "$HERMES_HOME/msn-bridge/msnclient/main.js.tmp"
+    mv -f "$HERMES_HOME/msn-bridge/msnclient/main.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/main.js"
     echo "[update-xp] updated local MSN bridge code"
   else
     echo "[update-xp] ERROR: local bridge install missing; run local-server/install.sh"

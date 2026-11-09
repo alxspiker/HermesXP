@@ -196,7 +196,7 @@ class VoiceState:
             return item["state"], item.get("audio", b"")
 
 
-def make_handler(state: VoiceState):
+def make_handler(state: VoiceState, *, native: bool = False):
     class Handler(BaseHTTPRequestHandler):
         server_version = "HermesXP-Voice"
         sys_version = ""
@@ -214,6 +214,17 @@ def make_handler(state: VoiceState):
                 self.wfile.write(body)
 
         def _device(self):
+            if native:
+                # Native MSN RTP bridge runs on this same Debian machine.
+                # It never needs access to the LAN pairing token or agent
+                # credential. Restrict to loopback + separate bridge secret.
+                expected = os.environ.get("HERMES_MSN_BRIDGE_TOKEN", "")
+                supplied = self.headers.get("X-Hermes-Token", "")
+                if (self.client_address[0] == "127.0.0.1"
+                        and len(expected) >= 32 and isinstance(supplied, str)
+                        and hmac.compare_digest(expected, supplied)):
+                    return {"host": "native-msn", "token": expected}
+                return None
             try:
                 return state.device_for(self.client_address[0],
                                         self.headers.get("X-Hermes-Token", ""))
@@ -285,12 +296,25 @@ def main():
     if address.version != 4 or not address.is_private or address.is_loopback:
         parser.error("voice service must bind a private, non-loopback IPv4 address")
     logging.basicConfig(level=logging.INFO)
-    server = ThreadingHTTPServer((str(address), args.port), make_handler(VoiceState()))
+    state = VoiceState()
+    server = ThreadingHTTPServer((str(address), args.port), make_handler(state))
+    # Separate private audio gateway used ONLY by the MSN RTP handler.
+    # Avoid forwarding the API_SERVER_KEY to Node / Messenger.
+    if len(os.environ.get("HERMES_MSN_BRIDGE_TOKEN", "")) >= 32:
+        native_server = ThreadingHTTPServer(
+            ("127.0.0.1", 18771), make_handler(state, native=True))
+        Thread(target=native_server.serve_forever, daemon=True).start()
+        log.info("Native MSN speech worker listening on loopback port 18771")
+    else:
+        log.warning("Native MSN voice disabled: HERMES_MSN_BRIDGE_TOKEN missing")
     log.info("XP voice gateway bound on %s:%s (paired IP and token only)", *server.server_address)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         server.server_close()
+        if 'native_server' in locals():
+            native_server.shutdown()
+            native_server.server_close()
 
 
 if __name__ == "__main__":

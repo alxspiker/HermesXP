@@ -1,5 +1,46 @@
 # HermesXP / MSN Messenger Bridge — prototype
 
+### Native Windows Live Messenger Computer Call experiment (v0.5.0)
+
+The repository now includes a genuine **MSNP13 / SIP / SDP / RTP** voice
+endpoint on the Hermes computer. Windows Live Messenger's existing audio
+interface is the intended microphone/speaker frontend; the XP companion's
+separate Talk button is **not** involved in this path.
+
+The native endpoint is opt-in while interoperability with WLM 2009 is tested.
+In the host's private `~/.hermes/msn-bridge.env` (not in GitHub), set:
+
+```ini
+MSN_BOT_PROTOCOL=13
+HERMES_MSN_NATIVE_CALL=1
+HERMES_MSN_NATIVE_IP=<Hermes host private LAN IPv4>
+```
+
+Restart `hermes-msn-bridge.service` and `hermes-xp-voice.service`.
+The MSN bot then advertises SIP-call capabilities and accepts **incoming
+plain SIP/SDP invitations tunneled via UUN/UBN**, negotiating PCMU/8000
+(G.711 μ-law) RTP over a LAN-only UDP port 19740. The RTP stream is handled
+by the native Node bridge, while the voice worker on loopback 18771 uses the
+local LFM3-Audio speech recognition and TTS plus Hermes's agent route.
+Only the configured MSN owner and paired XP IP can originate the call.
+Neither the native-media process nor XP obtains the Hermes agent key.
+
+**Compatibility caveat:** WLM 2009 implements multiple proprietary call
+envelopes and SIP tunnel versions. Its **actual Call button → our bot**
+exchange is not verified yet; UUN/UBN *plain SIP* and PCMU are implemented,
+not every proprietary signaling format. A live test may show a different
+envelope, which requires interpreting its real bytes rather than guessing.
+The interface remains the original Messenger interface, even if the call
+cannot negotiate yet.
+
+If calls fail, unset `HERMES_MSN_NATIVE_CALL` and
+`MSN_BOT_PROTOCOL`, then restart the bot service. The default MSNP9 text
+channel remains available. This feature does not enable port forwarding,
+firewall changes, or public call access; expose UDP/19740 only between the
+paired XP and Hermes host on a trusted LAN. Native voice is experimental,
+with up to one active call and asynchronous speech turns (not low-latency
+continuous streaming yet).
+
 ### Voice companion preview (v0.4.0)
 
 The XP executable now has **Talk to Hermes (5s)**, a push-to-talk-style

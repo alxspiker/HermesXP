@@ -12,6 +12,7 @@ const readline = require('readline');
 const fs = require('fs');
 const os = require('os');
 const MSNClient = require('./msnclient/main.js').MSNClient;
+const {NativeCall} = require('./native_call.js');
 
 const email = process.env.MSN_BOT_EMAIL;
 const password = process.env.MSN_BOT_PASSWORD;
@@ -80,6 +81,32 @@ standaloneServer.on('error', error => {
 });
 
 const client = new MSNClient(email, password);
+let nativeCall = null;
+if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
+  if (process.env.MSN_BOT_PROTOCOL !== '13') {
+    console.error('Native MSN calling requires MSN_BOT_PROTOCOL=13');
+    process.exit(2);
+  }
+  const host = process.env.HERMES_MSN_NATIVE_IP;
+  const device = (() => {
+    try {
+      const registry = JSON.parse(fs.readFileSync(path.join(
+        process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'),
+        'hermesxp-devices.json'), 'utf8'));
+      return (registry.devices || []).find(d =>
+        d && net.isIP(d.host) === 4 && /^[0-9a-f]{64}$/i.test(d.token || ''));
+    } catch { return null; }
+  })();
+  if (!host || !device) {
+    console.error('Native MSN calling needs HERMES_MSN_NATIVE_IP and paired XP');
+    process.exit(2);
+  }
+  nativeCall = new NativeCall({
+    client, owner, host, xpHost: device.host, token,
+  });
+  nativeCall.start();
+  client.on('native_signal', signal => nativeCall.onSignal(signal));
+}
 // A Messenger /call text command requests an authenticated invitation from
 // the XP companion. This is NOT native Messenger SIP/RTP calling. The XP user
 // must confirm the invite before the microphone starts recording.
@@ -192,6 +219,7 @@ client.on('msg', msg => {
   }
 });
 client.on('close', () => {
+  if (nativeCall) nativeCall.stop();
   console.error('MSN connection closed; exiting so the supervisor can reconnect.');
   process.exit(1);
 });

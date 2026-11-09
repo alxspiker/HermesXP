@@ -47,6 +47,29 @@ const standaloneServer = http.createServer((req, res) => {
     res.end(body);
   }
   if (!authenticated(req)) return reply(401, {error: 'unauthorized'});
+  // Native calls are controlled through the same *loopback-only* authenticated
+  // interface as Hermes's MSN send_message integration. This lets a Hermes
+  // tool initiate/end a call without fabricating an incoming MSN chat command.
+  if (req.method === 'POST' && ['/call/start','/call/end','/call/status'].includes(req.url)) {
+    if (req.headers['transfer-encoding'] ||
+        (req.headers['content-length'] !== undefined &&
+         req.headers['content-length'] !== '0'))
+      return reply(400, {error: 'call action takes no body'});
+    if (client.active !== true || !nativeCall)
+      return reply(503, {error: 'native MSN calling is not connected'});
+    if (req.url === '/call/status')
+      return reply(200, {success: true, active: Boolean(nativeCall.call),
+                         outgoing: Boolean(nativeCall.call?.initiated)});
+    try {
+      const ok = req.url === '/call/start' ? nativeCall.invite() : nativeCall.hangup();
+      return reply(ok ? 202 : 409, {success: ok, active: Boolean(nativeCall.call),
+                                   error: ok ? undefined :
+                                     (req.url === '/call/start' ? 'call already active' : 'no active call')});
+    } catch (error) {
+      console.warn('Native call action failed:', error.message);
+      return reply(503, {error: 'native MSN call signaling unavailable'});
+    }
+  }
   if (req.method !== 'POST' || req.url !== '/send') return reply(404, {error: 'not found'});
   const length = Number(req.headers['content-length']);
   if (!Number.isInteger(length) || length < 2 || length > MAX_SEND_BODY ||

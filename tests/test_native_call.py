@@ -143,6 +143,98 @@ assert.equal(native.hangup(),false);
 native.stop();
 """)
 
+    def test_messenger_call_toolbar_rendezvous_and_native_end_button(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {NativeCall,decodeNativeSignal,encodeNativeSignal}=require('./native_call.js');
+const sent=[],timers=[];
+const origTimeout=global.setTimeout;
+const origClearTimeout=global.clearTimeout;
+global.setTimeout=(fn,delay)=>{const timer={fn,delay,cleared:false};timers.push(timer);return timer;};
+global.clearTimeout=t=>{if(t)t.cleared=true;};
+const n=new NativeCall({
+ client:{email:'bot@hermes.local',
+  sendNativeSignal:(to,type,payload)=>sent.push({to,type,payload})},
+ owner:'owner@hermes.local',host:'192.168.1.81',
+ xpHost:'192.168.1.84',token:'a'.repeat(64),
+ logger:{info(){},warn(){},error(){}}
+});
+try {
+ const rendezvous={sender:'owner@hermes.local',type:11,
+  payload:Buffer.from('1 3 7 234889141 0 3 0')};
+ n.onSignal({...rendezvous,sender:'stranger@hermes.local'});
+ assert.equal(sent.length,0,'only the paired owner may initiate a call');
+ n.onSignal(rendezvous);
+ assert.equal(sent.length,1);
+ assert.equal(sent[0].payload.toString(),'2 3 5 234889141 0 3 0');
+ assert(timers.some(t=>t.delay===300));
+ n.onSignal(rendezvous);
+ assert.equal(sent.length,1,'duplicate button events must not generate duplicate SIP invites');
+ const ready=timers.find(t=>t.delay===300);
+ ready.fn();
+ assert.equal(sent.length,2);
+ const offer=decodeNativeSignal(12,sent[1].payload);
+ assert(offer.sip.toString().startsWith('INVITE '));
+ assert.equal(n.call.initiated,true);
+ // Calling /hangup from the Hermes side must still work.
+ assert.equal(n.hangup(),true);
+ assert.equal(n.call,null);
+ assert.equal(sent.length,3);
+ // WLM emits a type-11 rendezvous frame as it tears down a call.
+ // It must never produce a redial after that BYE.
+ n.lastRendezvousAt=0;
+ n.onSignal(rendezvous);
+ assert.equal(sent.length,3,'post-hangup rendezvous must not re-invite');
+ assert.equal(n.call,null);
+ // When Messenger calls again after the guard interval, it should work.
+ n.lastCallEndedAt=Date.now()-5000;
+ n.onSignal(rendezvous);
+ assert.equal(sent.length,4);
+ const again=timers.filter(t=>t.delay===300).at(-1);
+ again.fn();
+ assert.equal(sent.length,5);
+ assert(n.call);
+ // WLM End Call sends a SIP BYE. The bot should return 200 and close.
+ const callId=n.call.id;
+ const bye=[
+  'BYE sip:bot@hermes.local SIP/2.0',
+  'Via: SIP/2.0/TCP 192.168.1.84:5060',
+  'From: <sip:owner@hermes.local>;tag=abc',
+  'To: <sip:bot@hermes.local>;tag=def',
+  'Call-ID: '+callId,'CSeq: 2 BYE','Content-Length: 0','','',
+ ].join('\r\n');
+ n.onSignal({sender:'owner@hermes.local',type:12,
+  payload:encodeNativeSignal(callId,Buffer.from(bye))});
+ assert.equal(n.call,null);
+ const answer=decodeNativeSignal(12,sent.at(-1).payload);
+ assert(answer.sip.toString().startsWith('SIP/2.0 200 OK'));
+ assert.equal(n.hangup(),false,'chat hangup accurately reports no active call');
+}finally{n.stop();global.setTimeout=origTimeout;global.clearTimeout=origClearTimeout;}
+""")
+
+    def test_messenger_rendezvous_pending_invitation_can_be_cancelled(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {NativeCall}=require('./native_call.js');
+const sent=[],timeouts=[];
+const oldTimeout=global.setTimeout,oldClear=global.clearTimeout;
+global.setTimeout=(fn,ms)=>{const t={fn,ms,cancelled:false};timeouts.push(t);return t;};
+global.clearTimeout=t=>{if(t)t.cancelled=true;};
+const n=new NativeCall({client:{email:'bot@hermes.local',
+ sendNativeSignal:(to,type,p)=>sent.push({type,p})},owner:'owner@hermes.local',
+ host:'192.168.1.81',xpHost:'192.168.1.84',
+ token:'a'.repeat(64),logger:{info(){},warn(){},error(){}}});
+try{
+ n.onSignal({sender:'owner@hermes.local',type:11,
+   payload:Buffer.from('1 3 7 234889141 0 3 0')});
+ assert.equal(sent.length,1);
+ assert.equal(n.hangup(),true,'Hermes can cancel pending toolbar invitation');
+ assert.equal(timeouts[0].cancelled,true);
+ timeouts[0].fn();
+ assert.equal(sent.length,1,'cancelled invitation must never start later');
+}finally{n.stop();global.setTimeout=oldTimeout;global.clearTimeout=oldClear;}
+""")
+
     def test_pcmu_rtp_conversions(self):
         self.run_js(r"""
 const assert = require('assert');

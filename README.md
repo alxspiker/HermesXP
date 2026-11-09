@@ -67,7 +67,33 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.3)
+### Native Messenger calls (v0.7.4)
+
+**Native Call toolbar integration (v0.7.4).** When the paired owner presses
+the Call button in Windows Live Messenger, the MSN bridge receives WLM's
+type-11 rendezvous metadata. It authenticates the sender, sends WLM's
+capability reply and initiates a native, reciprocal SIP invitation through
+the same G.711 RTP/Hermes Talk session used by /nativecall. The delay is
+300 ms, not 650 ms; duplicate requests and post-hangup negotiation frames
+are suppressed to prevent a new call starting after the End Call button.
+Messenger's native End Call button is handled via the tunneled SIP BYE.
+
+**Limit:** The legacy MSN service does not implement WLM 2009's original
+outgoing VOIP control plane (historically 0x80EE00C8). Therefore the Call
+button is handled through a reciprocal SIP invitation, which may still
+display Messenger's native Accept prompt and cannot guarantee the original
+outgoing WLM window stays connected. This is not an OS-wide WLM patch or a
+full replacement MSN VOIP service. Exact one-click calling requires a
+real-device acceptance test; there is no claim of verified interoperability
+until that passes.
+
+**Hermes agent call controls.** The plugin registers a tool named msn_call
+with action start, end or status. It calls the existing signed-in MSN bot's
+authenticated loopback interface on 127.0.0.1:18769, using the same pairing
+credentials and owner restriction as standalone send_message. /nativecall,
+/call and /hangup remain available as MSN chat commands. No arbitrary
+recipient, XP command execution, microphone capture or new voice provider
+is introduced.
 
 **Optional RTP packetization (v0.7.3).** Windows XP audio hardware and
 Messenger's internal receiver can be sensitive to extremely short playback

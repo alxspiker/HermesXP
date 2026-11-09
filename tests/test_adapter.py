@@ -121,4 +121,50 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(callable(observed["setup_fn"]))
         self.assertTrue(callable(observed["handler_fn"]))
 
+    async def test_registration_exposes_authenticated_native_call_tool(self):
+        observed = {}
+        class Registry:
+            def register_platform(self, **_): pass
+            def register_tool(self, **kwargs): observed.update(kwargs)
+        self.m.register(Registry())
+        self.assertEqual(observed["name"], "msn_call")
+        self.assertEqual(observed["toolset"], "hermes-msn")
+        self.assertEqual(
+            observed["schema"]["parameters"]["properties"]["action"]["enum"],
+            ["start", "end", "status"])
+        self.assertTrue(callable(observed["handler"]))
+
+    async def test_native_call_tool_uses_loopback_only_and_owner_scoped_secret(self):
+        class Reply:
+            status = 202
+            def read(self, _limit):
+                return b'{"success": true, "active": true}'
+
+        class Connection:
+            def __init__(self, host, port, timeout):
+                self.host, self.port, self.timeout = host, port, timeout
+                self.path = None
+            def request(self, method, path, body, headers):
+                self.method, self.path, self.body, self.headers = method, path, body, headers
+            def getresponse(self): return Reply()
+            def close(self): pass
+
+        seen = []
+        def make_connection(*args, **kwargs):
+            c = Connection(*args, **kwargs)
+            seen.append(c)
+            return c
+        with patch.dict(os.environ, {
+            "HERMES_MSN_BRIDGE_TOKEN": "t" * 48,
+            "HERMES_MSN_OWNER_EMAIL": "me@example.invalid",
+        }), patch.object(self.m.http.client, "HTTPConnection", side_effect=make_connection):
+            result = json.loads(self.m._handle_msn_call({"action": "start"}))
+        self.assertTrue(result["success"])
+        self.assertEqual(len(seen), 1)
+        self.assertEqual((seen[0].host, seen[0].port), ("127.0.0.1", 18769))
+        self.assertEqual((seen[0].method, seen[0].path), ("POST", "/call/start"))
+        self.assertEqual(seen[0].headers["X-Hermes-Token"], "t" * 48)
+        self.assertFalse(json.loads(self.m._handle_msn_call(
+            {"action": "run", "command": "net user"}))["success"])
+
 if __name__ == '__main__': unittest.main()

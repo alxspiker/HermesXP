@@ -31,6 +31,12 @@ const RTP_PREROLL_PACKETS = 4;
 // Short replies still flush via the existing 250ms stale-tail rule.
 const RTP_SPEECH_START_BYTES = 40 * RTP_SAMPLES_PER_PACKET;
 const RTP_MAX_CATCHUP_MS = 30;
+// WLM sends its type-11 media rendezvous request when its Call toolbar is
+// clicked, but may also send one immediately after a call ends. Never redial
+// on that trailing event or on duplicate preflight requests.
+const WLM_OUTGOING_REPLY_MS = 300;
+const WLM_POST_HANGUP_GUARD_MS = 4000;
+const WLM_RENDEZVOUS_DEBOUNCE_MS = 3000;
 
 function parseSip(data) {
   if (!Buffer.isBuffer(data) || data.length > 16384 || !data.length) return null;
@@ -226,6 +232,7 @@ class NativeCall {
   closeCall() {
     const old = this.call;
     this.call = null; // suppress reentrant callbacks from closing the socket
+    if (old) this.lastCallEndedAt = Date.now();
     if (old?.expiry) clearTimeout(old.expiry);
     if (old?.audioTimer) clearTimeout(old.audioTimer);
     if (old?.statsTimer) clearInterval(old.statsTimer);
@@ -256,6 +263,10 @@ class NativeCall {
   }
   invite() {
     if (this.call) return false;
+    if (this.rendezvousTimer) {
+      clearTimeout(this.rendezvousTimer);
+      this.rendezvousTimer = null;
+    }
     const callId = crypto.randomUUID();
     const xp = this.xpHost;
     const local = this.host;
@@ -295,6 +306,12 @@ class NativeCall {
     return true;
   }
   hangup() {
+    if (this.rendezvousTimer && !this.call) {
+      clearTimeout(this.rendezvousTimer);
+      this.rendezvousTimer = null;
+      this.lastCallEndedAt = Date.now();
+      return true;
+    }
     const call = this.call;
     if (!call) return false;
     if (call.remote || call.initiated) {
@@ -320,33 +337,33 @@ class NativeCall {
     // Type 11 carries rendezvous negotiation metadata; it isn't SIP. WLM
     // sends e.g. "1 3 7 <AppVersion> 0 3 0" before a real call.
     if (type === 11) {
-      this.logger.info('Native MSN call rendezvous metadata received');
       const notice = payload.toString('ascii');
       const match = /^1 3 7 ([0-9]{6,10}) 0 3 0$/.exec(notice);
       if (match && !this.call) {
-        // WLM requests peer media capability negotiation before its tunneled
-        // SIP INVITE. aMSN traces document its matching rendezvous reply
-        // shape ("2 3 5 <AppVersion> 0 3 0"). Keep it owner/IP restricted
-        // and bounded; this is not yet a proven WLM-originated call fix.
         const now = Date.now();
-        if (!this.lastRendezvousAt || now - this.lastRendezvousAt > 2500) {
-          this.lastRendezvousAt = now;
-          this.sendSignal(11, Buffer.from('2 3 5 ' + match[1] + ' 0 3 0'));
-          this.logger.info('Replied to native WLM call rendezvous');
-          // Original WLM 2009 outgoing Call still depends on an unimplemented
-          // Escargot VOIP service and may show 0x80EE00C8. Offer a *native
-          // reciprocal SIP call* instead: its Accept prompt and microphone/
-          // speaker stream remain entirely inside Windows Live Messenger.
-          this.rendezvousTimer = setTimeout(() => {
-            this.rendezvousTimer = null;
-            if (!this.call) {
-              try { this.invite(); }
-              catch(error) {
-                this.logger.warn('WLM reciprocal native invitation failed:',error.message);
-              }
-            }
-          }, 650);
-        }
+        if (this.lastCallEndedAt &&
+            now - this.lastCallEndedAt < WLM_POST_HANGUP_GUARD_MS) return;
+        if (this.lastRendezvousAt &&
+            now - this.lastRendezvousAt < WLM_RENDEZVOUS_DEBOUNCE_MS) return;
+        this.lastRendezvousAt = now;
+        // WLM 2009 announces its intended media session through type 11.
+        // Acknowledge the attempt, then offer a direct Hermes-managed SIP
+        // call. The legacy MSN VOIP server does not implement WLM's outgoing
+        // session, so the direct incoming invitation may still require the
+        // user to press Accept in the native Messenger UI.
+        this.sendSignal(11, Buffer.from('2 3 5 ' + match[1] + ' 0 3 0'));
+        this.logger.info('Windows Live Messenger Call button initiated native rendezvous');
+        if (this.rendezvousTimer) clearTimeout(this.rendezvousTimer);
+        this.rendezvousTimer = setTimeout(() => {
+          this.rendezvousTimer = null;
+          if (this.call || (this.lastCallEndedAt &&
+              Date.now() - this.lastCallEndedAt < WLM_POST_HANGUP_GUARD_MS)) return;
+          try {
+            if (this.invite()) this.logger.info('Sent Messenger Call button reciprocal SIP invitation');
+          } catch (error) {
+            this.logger.warn('Messenger Call button SIP invitation failed:', error.message);
+          }
+        }, WLM_OUTGOING_REPLY_MS);
       }
       return;
     }

@@ -255,6 +255,35 @@ def register(ctx):
         platform_hint="You are speaking to the owner via classic MSN Messenger. Send plain text, avoid Markdown formatting.",
         emoji="💬",
     )
+    # Hermes has explicit native MSN call control just like send_message:
+    # the tool goes to the already signed-in local bridge, never to XP or
+    # an arbitrary contact. Existing /nativecall and /hangup chat commands
+    # remain supported independently.
+    register_tool = getattr(ctx, "register_tool", None)
+    if callable(register_tool):
+        register_tool(
+            name="msn_call", toolset="hermes-msn",
+            schema={
+                "name": "msn_call",
+                "description": (
+                    "Control an authenticated native Windows Live Messenger voice "
+                    "call with the paired owner. Start, end or check the call; "
+                    "the audio and Hermes tools are handled by the Hermes Talk plugin."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["start", "end", "status"],
+                                   "description": "Start an outgoing MSN call, end the current call, or read call status."},
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            },
+            handler=_handle_msn_call,
+            check_fn=check_requirements,
+            emoji="📞",
+        )
     # Run Hermes Talk in the same Hermes CLI plugin context so its provider,
     # OAuth, tool delegation, and model choices stay with the Talk plugin.
     register_cli = getattr(ctx, "register_cli_command", None)
@@ -264,6 +293,33 @@ def register(ctx):
             setup_fn=_setup_xpvoice_cli, handler_fn=_run_xpvoice_cli,
             description="Authenticated loopback PCM bridge using the selected Hermes Talk provider",
         )
+
+
+def _handle_msn_call(args, **_kwargs):
+    """Hermes agent tool for native MSN call control. Not a shell shortcut."""
+    action = args.get("action") if isinstance(args, dict) else None
+    if action not in ("start", "end", "status"):
+        return json.dumps({"success": False, "error": "Invalid call action"})
+    token = str(get_scoped_secret("HERMES_MSN_BRIDGE_TOKEN") or "")
+    owner = str(get_scoped_secret("HERMES_MSN_OWNER_EMAIL") or "").strip().lower()
+    if len(token) < 32 or not owner:
+        return json.dumps({"success": False, "error": "MSN bridge is not configured"})
+    endpoint = "/call/" + action
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", 18769, timeout=6)
+        try:
+            connection.request("POST", endpoint, body=b"",
+                               headers={"X-Hermes-Token": token, "Content-Length": "0"})
+            response = connection.getresponse()
+            payload = json.loads(response.read(1024))
+            if response.status not in (200, 202):
+                return json.dumps({"success": False,
+                                   "error": payload.get("error", "Call action unavailable")})
+            return json.dumps(payload)
+        finally:
+            connection.close()
+    except (OSError, ValueError, http.client.HTTPException):
+        return json.dumps({"success": False, "error": "Local MSN call controller unavailable"})
 
 
 def _talk_bridge():

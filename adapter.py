@@ -10,7 +10,9 @@ import http.client
 import hmac
 import json
 import logging
+import importlib.util
 import os
+from pathlib import Path
 import re
 import socket
 import uuid
@@ -253,3 +255,32 @@ def register(ctx):
         platform_hint="You are speaking to the owner via classic MSN Messenger. Send plain text, avoid Markdown formatting.",
         emoji="💬",
     )
+    # Run Hermes Talk in the same Hermes CLI plugin context so its provider,
+    # OAuth, tool delegation, and model choices stay with the Talk plugin.
+    register_cli = getattr(ctx, "register_cli_command", None)
+    if callable(register_cli):
+        register_cli(
+            name="xpvoice", help="HermesXP MSN <-> Hermes Talk audio service",
+            setup_fn=_setup_xpvoice_cli, handler_fn=_run_xpvoice_cli,
+            description="Authenticated loopback PCM bridge using the selected Hermes Talk provider",
+        )
+
+
+def _talk_bridge():
+    source = Path(__file__).resolve().parent / "tools" / "talk_bridge.py"
+    if not source.is_file():
+        raise RuntimeError("HermesXP full plugin checkout required for Talk audio")
+    spec = importlib.util.spec_from_file_location("hermesxp_talk_bridge", source)
+    module = importlib.util.module_from_spec(spec)
+    import sys
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _setup_xpvoice_cli(parser):
+    _talk_bridge().setup_cli(parser)
+
+
+def _run_xpvoice_cli(args):
+    _talk_bridge().cli_entry(args)

@@ -147,7 +147,7 @@ native.stop();
         self.run_js(r"""
 const assert = require('assert');
 const {
-  ulawEncode,ulawDecode,encodeRtp,parseRtp,resamplePcm8To16
+  ulawEncode,ulawDecode,encodeRtp,parseRtp,resamplePcm8To16,pcmuToTalk,talkFrame
 } = require('./native_call.js');
 for (const value of [-32000,-16000,-2000,-100,0,100,2000,16000,32000]) {
   const encoded=ulawEncode(value);
@@ -158,80 +158,62 @@ const payload=Buffer.alloc(160,ulawEncode(4000));
 const frame=encodeRtp(payload,12,12345,6789);
 assert.deepEqual(parseRtp(frame),payload);
 assert.equal(resamplePcm8To16(payload).length,640);
+assert.equal(pcmuToTalk(payload).length,960);
+assert.equal(talkFrame('I',pcmuToTalk(payload)).length,965);
 assert.equal(parseRtp(Buffer.from('bad')),null);
 """)
 
-    def test_native_outgoing_audio_has_clocked_pacing_and_continuous_rtp(self):
+    def test_rtp_streams_directly_to_talk_and_returns_pcmu(self):
         self.run_js(r"""
 const assert = require('assert');
 const {performance} = require('perf_hooks');
-const {NativeCall,ulawDecode,parseRtp} = require('./native_call.js');
+const {NativeCall, ulawEncode, ulawDecode, encodeRtp, parseRtp,
+       pcmuToTalk, talkFrame} = require('./native_call.js');
+const packets=[];
 const native = new NativeCall({
-  client:{},owner:'user@hermes.local',host:'127.0.0.1',
-  xpHost:'127.0.0.1',token:'x'.repeat(64),
+  client:{}, owner:'user@hermes.local', host:'192.168.1.81',
+  xpHost:'192.168.1.84', token:'x'.repeat(64),
   logger:{info(){},warn(){},error(){}},
 });
-const times=[],frames=[];
-native.sock.send = (packet) => {
-  times.push(performance.now());frames.push(Buffer.from(packet));
-};
-const call = {remote:{ip:'127.0.0.1',port:25000},seq:42,stamp:4096,ssrc:1234};
+native.sock.send = data=>packets.push(data);
+const written=[];
+const call={remote:{ip:'192.168.1.84',port:24100},
+  seq:2,stamp:1024,ssrc:5, talkReady:true,
+  talk:{write:buf=>written.push(buf),writableLength:0,destroyed:false,destroy(){}},
+  talkIncoming:Buffer.alloc(0),talkRemainder:Buffer.alloc(0),
+  output:Buffer.alloc(0),outSpeaking:false,packetAt:performance.now()};
 native.call=call;
-// 1 second PCM16 mono at 16kHz. Alternating +/- at Nyquist should be
-// averaged close to silence, NOT aliased into constant peak volume.
-const pcm=Buffer.alloc(32000);
-for(let i=0;i<pcm.length/2;i++)
-  pcm.writeInt16LE(i%2 ? -30000 : 30000,i*2);
-const begin=performance.now();
-native.playPcm16(call,pcm).then(()=>{
-  assert.equal(frames.length,50);
-  assert.equal(frames[0].readUInt16BE(2),42);
-  assert.equal(frames[49].readUInt16BE(2),91);
-  assert.equal(frames[0].readUInt32BE(4),4096);
-  assert.equal(frames[49].readUInt32BE(4),4096+160*49);
-  assert(frames[0][1]&0x80); // first packet marks new talkspurt
-  assert(!(frames[1][1]&0x80));
-  assert(times[3]-times[0]<35); // receiver gets 80ms pre-buffer immediately
-  assert(times.at(-1)-times[0]<975); // no cumulative 20ms sleep drift
-  assert(performance.now()-begin<1250);
-  assert(!call.playing);
-  assert(Math.abs(ulawDecode(parseRtp(frames[0])[0]))<150);
-  native.stop();
-}).catch(e=>{console.error(e);process.exit(2)});
-""")
-
-    def test_rtp_silence_never_triggers_transcription_but_speech_does(self):
-        self.run_js(r"""
-const assert = require('assert');
-const {NativeCall,encodeRtp,ulawEncode} = require('./native_call.js');
-const native = new NativeCall({
-  client:{},owner:'user@hermes.local',host:'192.168.1.81',
-  xpHost:'192.168.1.84',token:'x'.repeat(64),
-  logger:{info(){},warn(){},error(){}},
-});
-const call = {remote:{ip:'192.168.1.84',port:24100},busy:false};
-native.call=call;
-const captured=[];
-native.processTurn=async (_,pcm)=>{captured.push(pcm)};
-let seq=0;
-function send(value){
-  const audio=Buffer.alloc(160,ulawEncode(value));
-  const pkt=encodeRtp(audio,seq++,seq*160,1);
-  native.onRtp(pkt,{address:'192.168.1.84',port:24100});
+const incoming=Buffer.alloc(160,ulawEncode(1800));
+const rtp=encodeRtp(incoming,1,160,55);
+native.onRtp(rtp,{address:'192.168.1.85',port:24100});
+native.onRtp(rtp,{address:'192.168.1.84',port:24101});
+assert.equal(written.length,0);
+native.onRtp(rtp,{address:'192.168.1.84',port:24100});
+assert.equal(written.length,1);
+assert.equal(written[0].readUInt32BE(0),961);
+assert.equal(written[0][4],'I'.charCodeAt(0));
+assert.equal(written[0].length,965);
+assert.equal(pcmuToTalk(incoming).length,960);
+// A 0.3 second 24kHz signed stream becomes 0.3 seconds of 8kHz PCMU.
+const spoken=Buffer.alloc(14400);
+for(let i=0;i<spoken.length/2;i++) spoken.writeInt16LE(5000,i*2);
+const output=talkFrame('O',spoken);
+native.onTalkData(call,output.subarray(0,13));
+assert.equal(call.output.length,0);
+native.onTalkData(call,output.subarray(13));
+assert.equal(call.output.length,2400);
+call.packetAt=performance.now()-10;
+for(let i=0;i<19;i++){
+  native.tickTalkAudio(call);
+  call.packetAt=performance.now()-10;
 }
-for(let i=0;i<700;i++)send(0); // 14s silence: do not send to ASR
-assert.equal(captured.length,0);
-assert.equal(call.recording,undefined);
-assert(call.preRoll.length<=10);
-call.greetingPending=true;
-for(let i=0;i<50;i++)send(4000);
-assert.equal(captured.length,0);
-call.greetingPending=false;
-for(let i=0;i<12;i++)send(4000); // 240ms of real voice
-for(let i=0;i<32;i++)send(0);   // 640ms quiet -> complete
-assert.equal(captured.length,1);
-assert(captured[0].length>=16000);
-assert(captured[0].length<50000);
+assert(packets.length>=15);
+const media=packets.map(parseRtp);
+assert(media.some(payload=>Math.abs(ulawDecode(payload[0]))>1000));
+for(let i=1;i<packets.length;i++){
+ assert.equal(packets[i].readUInt16BE(2),(packets[i-1].readUInt16BE(2)+1)&0xffff);
+ assert.equal(packets[i].readUInt32BE(4),packets[i-1].readUInt32BE(4)+160);
+}
 native.stop();
 """)
 

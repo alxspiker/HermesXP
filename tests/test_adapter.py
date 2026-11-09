@@ -111,4 +111,14 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
         self.m.register(Registry())
         self.assertIs(captured['standalone_sender_fn'], self.m.standalone_send)
 
+    async def test_registration_exposes_talk_only_cli(self):
+        observed={}
+        class Registry:
+            def register_platform(self, **kwargs): pass
+            def register_cli_command(self, **kwargs): observed.update(kwargs)
+        self.m.register(Registry())
+        self.assertEqual(observed["name"], "xpvoice")
+        self.assertTrue(callable(observed["setup_fn"]))
+        self.assertTrue(callable(observed["handler_fn"]))
+
 if __name__ == '__main__': unittest.main()

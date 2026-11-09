@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.5.3
-description: "HermesXP native WLM2009 voice calls with clock-paced RTP output, 80ms jitter prebuffer, fast local conversations, speech-triggered recording, and MSNP18/SSO SIP signaling."
+version: 0.6.0
+description: "Native Windows Live Messenger calls using the installed Hermes Talk provider, with authenticated loopback streaming PCM and standard MSN MSNP18/SSO SIP signaling."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process
@@ -20,8 +20,14 @@ optional_env:
   - name: HERMES_MSN_NATIVE_IP
     description: Private LAN IPv4 address to advertise in SIP/SDP and bind RTP/UDP on the Hermes host
     password: false
-  - name: HERMES_XP_VOICE_BIND
-    description: Private Hermes LAN IPv4 address for the separate authenticated speech endpoint (default detected from host)
+  - name: HERMES_XP_TALK_TARGET
+    description: Optional authorized Hermes Talk task target (required for GPT-Live mode). Configure on the host in private msn-bridge.env.
+    password: false
+  - name: HERMES_XP_TALK_PEER
+    description: Optional Talk task peer for target selection (default local)
+    password: false
+  - name: HERMES_XP_TALK_PROFILE
+    description: Optional Talk task profile for target selection (default default)
     password: false
   - name: HERMES_XP_PROBE_BIND
     description: Optional local LAN IPv4 bind address for read-only XP connectivity checks (leave blank to disable)

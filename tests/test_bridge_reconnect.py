@@ -82,9 +82,12 @@ setTimeout(async ()=>{
         self.assertEqual(result.returncode, 0, result.stdout[-350:]+result.stderr[-350:])
         self.assertIn('STANDALONE_MSN_AUTH_TEST_PASS', result.stdout)
 
-    def test_authorized_msn_call_invites_paired_xp_without_starting_mic(self):
-        """The native WLM Call button is not emulated; the /call text
-        command only queues a consent-gated notification in HermesXP."""
+    def test_legacy_companion_voice_invites_are_not_sent(self):
+        """No /voice/invite requests to the old XP audio companion.
+
+        Without native calling enabled, /call is handled as ordinary bot
+        input. Only the separate native SIP Messenger call path opens audio.
+        """
         harness = r'''
 const EventEmitter = require('events');
 const Module = require('module');
@@ -128,10 +131,8 @@ require(process.argv[1]);
 setTimeout(() => {
   const invite = seen.filter(x=>x.path === '/voice/invite');
   const reply = seen.filter(x=>x.sent);
-  const ok = invite.length === 1 && invite[0].hostname === '192.168.1.84' &&
-    invite[0].method === 'POST' && invite[0].headers['X-Hermes-Token'] === 'a'.repeat(64) &&
-    reply.length === 1 && reply[0].text.includes('Accept it in HermesXP');
-  console.log(ok?'MSN_CALL_CONSENT_TEST_PASS':'MSN_CALL_CONSENT_TEST_FAIL');
+  const ok = invite.length === 0 && reply.length === 0;
+  console.log(ok?'MSN_LEGACY_CALL_REMOVED_PASS':'MSN_LEGACY_CALL_REMOVED_FAIL');
   process.exit(ok?0:8);
 },80);
 '''
@@ -145,7 +146,7 @@ setTimeout(() => {
         result = subprocess.run(['node', '-e', harness, str(ROOT / 'msn-bridge' / 'bridge.js')],
                                 env=env, capture_output=True, text=True, timeout=4)
         self.assertEqual(result.returncode, 0, result.stdout[-350:]+result.stderr[-350:])
-        self.assertIn('MSN_CALL_CONSENT_TEST_PASS', result.stdout)
+        self.assertIn('MSN_LEGACY_CALL_REMOVED_PASS', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

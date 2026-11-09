@@ -2,8 +2,9 @@
 /* Experimental *native* MSN Computer Call endpoint.
  *
  * The bot processes tunneled SIP INVITE/BYE over MSN UUN/UBN and receives
- * bidirectional PCMU (G.711 u-law) RTP on UDP. Media is handed to the same
- * loopback-only local Hermes speech/agent worker used by the XP companion.
+ * bidirectional PCMU (G.711 u-law) RTP on UDP. Media is streamed into the
+ * authenticated loopback Hermes Talk adapter. Talk owns ALL voice providers,
+ * authentication, realtime conversation, and Hermes tool delegation.
  * No audio capture, extra program, or call UI runs on XP.
  *
  * Transport caveat: WLM 2009 has several proprietary SIP tunnel variants.
@@ -13,19 +14,14 @@
  */
 const dgram = require('dgram');
 const crypto = require('crypto');
-const http = require('http');
 const net = require('net');
 const {performance} = require('perf_hooks');
 
 const DEFAULT_PORT = 19740;
 const MAX_CALL_MS = 30 * 60 * 1000;
-// 10s maximum at 16kHz PCM16, matching voice_gateway.MAX_INPUT exactly.
-const MAX_RECORD_BYTES = 16000 * 2 * 10;
-const SILENCE_MS = 560;
-const MIN_TALK_MS = 180;
-const MAX_TALK_MS = 9000;
-const PRE_ROLL_MS = 180;
-const AUDIO_WORKER_PORT = 18771;
+const TALK_BRIDGE_PORT = 18771;
+const TALK_MAX_FRAME = 256 * 1024;
+const TALK_MAX_PENDING = 256 * 1024;
 const RTP_PACKET_MS = 20;
 const RTP_SAMPLES_PER_PACKET = 160;
 const RTP_PREROLL_PACKETS = 4;
@@ -147,6 +143,24 @@ function resamplePcm8To16(ulaw) {
   }
   return result;
 }
+function pcmuToTalk(ulaw) {
+  // 8kHz PCMU -> Talk's 24kHz PCM16. Repetition preserves speech samples
+  // without depending on the legacy 16kHz ASR/TTS pipeline.
+  const out = Buffer.alloc(ulaw.length * 6);
+  for (let i = 0; i < ulaw.length; i++) {
+    const sample = ulawDecode(ulaw[i]);
+    for (let n = 0; n < 3; n++) out.writeInt16LE(sample, i * 6 + n * 2);
+  }
+  return out;
+}
+function talkFrame(type, payload = Buffer.alloc(0)) {
+  if (!Buffer.isBuffer(payload) || payload.length + 1 > TALK_MAX_FRAME)
+    throw new Error('Invalid Hermes Talk audio frame');
+  const header = Buffer.alloc(5);
+  header.writeUInt32BE(payload.length + 1, 0);
+  header[4] = type.charCodeAt(0);
+  return Buffer.concat([header, payload]);
+}
 function encodeRtp(payload, seq, stamp, ssrc, marker = false) {
   const frame = Buffer.alloc(12 + payload.length);
   frame[0] = 0x80; frame[1] = marker ? 0x80 : 0;
@@ -169,30 +183,6 @@ function parseRtp(datagram) {
   if (datagram[0] & 0x20) end -= datagram[end - 1];
   if (end <= offset) return null;
   return datagram.subarray(offset, end);
-}
-
-function requestWorker(token, method, route, body = Buffer.alloc(0)) {
-  return new Promise((resolve, reject) => {
-    if (!token || token.length < 32) return reject(new Error('native worker credential missing'));
-    const req = http.request({
-      host: '127.0.0.1', port: AUDIO_WORKER_PORT,
-      method, path: route, timeout: 12000,
-      headers: {'X-Hermes-Token': token, 'Content-Type': 'application/octet-stream',
-                'Content-Length': body.length},
-    }, res => {
-      const buffers = [];
-      let length = 0;
-      res.on('data', part => {
-        length += part.length;
-        if (length > 1_500_000) return req.destroy(new Error('native speech response too large'));
-        buffers.push(part);
-      });
-      res.on('end', () => resolve({code: res.statusCode, body: Buffer.concat(buffers)}));
-    });
-    req.on('timeout', () => req.destroy(new Error('native worker timed out')));
-    req.on('error', reject);
-    req.end(body);
-  });
 }
 
 class NativeCall {
@@ -223,10 +213,13 @@ class NativeCall {
     this.sock.close();
   }
   closeCall() {
-    if (this.call?.expiry) clearTimeout(this.call.expiry);
+    const old = this.call;
+    this.call = null; // suppress reentrant callbacks from closing the socket
+    if (old?.expiry) clearTimeout(old.expiry);
+    if (old?.audioTimer) clearInterval(old.audioTimer);
+    if (old?.talk) old.talk.destroy();
     if (this.rendezvousTimer) clearTimeout(this.rendezvousTimer);
     this.rendezvousTimer = null;
-    this.call = null;
   }
   sendSignal(type, payload) {
     this.client.sendNativeSignal(this.owner, type, payload);
@@ -257,11 +250,10 @@ class NativeCall {
       'l: ' + Buffer.byteLength(sdp),
       '', sdp,
     ].join('\r\n');
-    this.call = {
+      this.call = {
       id: callId, remote: null, type:12, seq:0,
       stamp:crypto.randomBytes(4).readUInt32BE(0),
       ssrc:crypto.randomBytes(4).readUInt32BE(0),
-      chunks:[], bytes:0, voicedMs:0, quietMs:0, busy:false,
       initiated: true,
     };
     this.call.expiry = setTimeout(()=>this.closeCall(),MAX_CALL_MS);
@@ -381,20 +373,7 @@ class NativeCall {
         this.call.remote = remote;
         this.call.remoteTo = sip.headers.to;
         this.logger.info('Windows Live Messenger accepted native SIP call; RTP peer port',remote.port);
-        // Start the media flow from Hermes. WLM 2009 may not transmit a
-        // microphone RTP stream until the far end has begun sending audio.
-        // This also exercises the real negotiated native audio port.
-        const session = this.call;
-        session.greetingPending = true;
-        this.greet(session).catch(e =>
-          this.logger.warn('Native MSN greeting audio unavailable:', e.message))
-          .finally(() => {
-            if (this.call === session) {
-              session.greetingPending = false;
-              session.micQuietUntil = Date.now() + 350;
-              this.resetRecorder(session);
-            }
-          });
+        this.startTalk(this.call);
       }
       return;
     }
@@ -415,7 +394,6 @@ class NativeCall {
         remoteTo: sip.headers.from,
         stamp: crypto.randomBytes(4).readUInt32BE(0),
         ssrc: crypto.randomBytes(4).readUInt32BE(0),
-        chunks: [], bytes: 0, voicedMs: 0, quietMs: 0, busy: false,
       };
       const offerAnswer = [
         'v=0', 'o=HermesXP 0 0 IN IP4 ' + this.host, 's=HermesXP',
@@ -436,13 +414,17 @@ class NativeCall {
       this.logger.info('Hermes native MSN call ended');
       return;
     }
-    if (verb === 'ACK') return;
+    if (verb === 'ACK') {
+      if (this.call && this.call.id === inner.callId &&
+          this.call.remote && !this.call.talk)
+        this.startTalk(this.call);
+      return;
+    }
   }
   onRtp(frame, info) {
     const call = this.call;
-    if (!call || !call.remote || info.address !== call.remote.ip || info.port !== call.remote.port ||
-        call.busy || call.playing || call.greetingPending ||
-        (call.micQuietUntil && Date.now() < call.micQuietUntil))
+    if (!call || !call.remote || info.address !== call.remote.ip ||
+        info.port !== call.remote.port)
       return;
     const payload = parseRtp(frame);
     if (!payload || payload.length > 1280) return;
@@ -450,153 +432,114 @@ class NativeCall {
       call.rtpSeen = true;
       this.logger.info('First native Messenger PCMU RTP audio frame received');
     }
-    let peak = 0;
-    let squared = 0;
-    for (const sample of payload) {
-      const a = Math.abs(ulawDecode(sample));
-      if (a > peak) peak = a;
-      squared += a * a;
-    }
-    const rms = Math.sqrt(squared / payload.length);
-    const duration = payload.length / 8;
-    const voiced = rms >= Math.max(180, (call.noiseFloor || 30) * 2.7) && peak >= 460;
-    const pcmChunk = resamplePcm8To16(payload);
-    if (!call.recording) {
-      call.preRoll ||= [];
-      call.preRoll.push(pcmChunk);
-      while (call.preRoll.length * duration > PRE_ROLL_MS) call.preRoll.shift();
-      if (!voiced) {
-        // Learn only from non-speech packets. Silence is not passed to ASR,
-        // otherwise a ten-second silent call repeatedly hallucinated turns.
-        call.noiseFloor = 0.98 * (call.noiseFloor || rms) + 0.02 * rms;
-        return;
-      }
-      call.chunks = call.preRoll.splice(0);
-      call.bytes = call.chunks.reduce((total, part) => total + part.length, 0);
-      call.voicedMs = duration;
-      call.quietMs = 0;
-      call.recording = true;
-      call.recordedMs = call.chunks.length * duration;
-      return;
-    }
-    call.chunks.push(pcmChunk);
-    call.bytes += pcmChunk.length;
-    call.recordedMs = (call.recordedMs || 0) + duration;
-    if (voiced) {
-      call.voicedMs += duration;
-      call.quietMs = 0;
-    } else {
-      call.quietMs += duration;
-    }
-    const complete = (call.voicedMs >= MIN_TALK_MS && call.quietMs >= SILENCE_MS) ||
-      call.bytes >= MAX_RECORD_BYTES || call.recordedMs >= MAX_TALK_MS;
-    if (complete) {
-      if (call.voicedMs < MIN_TALK_MS) {
-        this.resetRecorder(call);
-        return;
-      }
-      const pcm = Buffer.concat(call.chunks);
-      const spokenMs = Math.round(call.voicedMs);
-      this.resetRecorder(call);
-      call.busy = true;
-      this.logger.info('Native WLM voice detected (%d ms speech, %d ms captured)',
-        spokenMs, Math.round(pcm.length / 32));
-      this.processTurn(call, pcm).catch(err => {
-        this.logger.warn('Native voice turn failed:', err.message);
-      }).finally(() => {
-        if (this.call === call) call.busy = false;
-      });
-    }
+    if (call.talkReady && call.talk && !call.talk.destroyed &&
+        call.talk.writableLength < TALK_MAX_PENDING)
+      call.talk.write(talkFrame('I', pcmuToTalk(payload)));
   }
-  resetRecorder(call) {
-    call.chunks = [];
-    call.preRoll = [];
-    call.bytes = 0;
-    call.voicedMs = 0;
-    call.quietMs = 0;
-    call.recordedMs = 0;
-    call.recording = false;
+  startTalk(call) {
+    if (this.call !== call || call.talk) return;
+    call.talkIncoming = Buffer.alloc(0);
+    call.talkRemainder = Buffer.alloc(0);
+    call.output = Buffer.alloc(0);
+    call.readyAt = 0;
+    call.outSpeaking = false;
+    call.packetAt = performance.now();
+    call.audioTimer = setInterval(() => this.tickTalkAudio(call), 10);
+    const connection = net.connect({host: '127.0.0.1', port: TALK_BRIDGE_PORT});
+    call.talk = connection;
+    connection.on('connect', () => {
+      if (this.call === call)
+        connection.write(talkFrame('H', Buffer.from(JSON.stringify({token: this.token}))));
+    });
+    connection.on('data', chunk => this.onTalkData(call, chunk));
+    connection.on('error', error => {
+      if (this.call === call)
+        this.logger.warn('Hermes Talk audio bridge unavailable:', error.code || error.message);
+    });
+    connection.on('close', () => {
+      if (this.call === call) {
+        this.logger.warn('Hermes Talk audio session closed; ending MSN call');
+        this.hangup();
+      }
+    });
+    this.logger.info('Starting MSN audio through Hermes Talk plugin');
   }
-  async greet(call) {
-    if (!call || call.remote === null) return;
-    const greeting = await requestWorker(this.token, 'GET', '/voice/greeting');
-    if (greeting.code !== 200) throw new Error('local TTS greeting failed');
+  onTalkData(call, chunk) {
     if (this.call !== call) return;
-    await this.playPcm16(call, greeting.body);
-  }
-  async processTurn(call, pcm) {
-    const started = await requestWorker(this.token, 'POST', '/voice/turn', pcm);
-    if (started.code !== 202) throw new Error('speech worker rejected native turn');
-    const turnId = started.body.toString('ascii');
-    if (!/^[0-9a-f]{24}$/.test(turnId)) throw new Error('invalid speech turn id');
-    let response;
-    for (let n = 0; n < 240; n++) {
-      if (this.call !== call) return;
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      response = await requestWorker(this.token, 'GET', '/voice/turn/' + turnId);
-      if (response.code !== 202) break;
+    call.talkIncoming = Buffer.concat([call.talkIncoming, chunk]);
+    if (call.talkIncoming.length > TALK_MAX_FRAME * 2) {
+      call.talk.destroy();return;
     }
-    if (!response || response.code !== 200 || this.call !== call)
-      throw new Error('native voice worker did not return audio');
-    await this.playPcm16(call, response.body);
-    if (this.call === call)
-      this.logger.info('Hermes voice response sent via native Messenger RTP');
-  }
-  async playPcm16(call, pcm) {
-    // Pre-encode every G.711 frame before streaming. Average pairs of
-    // 16kHz samples when decimating to 8kHz to reduce aliasing.
-    if (!Buffer.isBuffer(pcm) || pcm.length % 2)
-      throw new Error('Invalid PCM16 playback');
-    const frames = [];
-    for (let offset = 0; offset + 640 <= pcm.length; offset += 640) {
-      const chunk = Buffer.alloc(RTP_SAMPLES_PER_PACKET);
-      for (let i = 0; i < RTP_SAMPLES_PER_PACKET; i++) {
-        const a = pcm.readInt16LE(offset + i * 4);
-        const b = pcm.readInt16LE(offset + i * 4 + 2);
-        chunk[i] = ulawEncode(Math.round((a + b) / 2));
-      }
-      frames.push(encodeRtp(chunk, call.seq++, call.stamp, call.ssrc,
-                            frames.length === 0));
-      call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
-    }
-    if (!frames.length) return;
-    call.playing = true;
-    try {
-      // Scheduling from absolute monotonic deadlines avoids the cumulative
-      // drift caused by awaiting 20ms *after* every packet. Prime the
-      // Windows Messenger jitter buffer with 80ms before steady pacing.
-      const start = performance.now();
-      let maxLate = 0;
-      let latePackets = 0;
-      for (let i = 0; i < frames.length; i++) {
-        if (this.call !== call) return;
-        const deadline = start + Math.max(0, i - RTP_PREROLL_PACKETS + 1) *
-          RTP_PACKET_MS;
-        while (performance.now() < deadline - 0.6) {
-          const remaining = deadline - performance.now();
-          await new Promise(resolve => setTimeout(resolve, Math.max(1, Math.floor(remaining))));
-          if (this.call !== call) return;
+    while (call.talkIncoming.length >= 5) {
+      const len = call.talkIncoming.readUInt32BE(0);
+      if (len < 1 || len > TALK_MAX_FRAME) {call.talk.destroy();return;}
+      if (call.talkIncoming.length < 4 + len) return;
+      const type = String.fromCharCode(call.talkIncoming[4]);
+      const payload = call.talkIncoming.subarray(5, 4 + len);
+      call.talkIncoming = call.talkIncoming.subarray(4 + len);
+      if (type === 'R') {
+        call.talkReady = true;
+        this.logger.info('Hermes Talk PCM bridge ready');
+      } else if (type === 'D') {
+        // Hermes Talk owns interruption/truncation decisions.
+        call.output = Buffer.alloc(0);
+        call.talkRemainder = Buffer.alloc(0);
+        call.outSpeaking = false;
+      } else if (type === 'X') {
+        this.logger.warn('Hermes Talk rejected native call (%s)',
+                         payload.toString('ascii').slice(0, 100));
+        call.talk.destroy();
+      } else if (type === 'O') {
+        // Incoming Talk audio is PCM16/24000, not the old 16kHz worker WAV.
+        const combined = Buffer.concat([call.talkRemainder, payload]);
+        const samples = Math.floor(combined.length / 6);
+        const compressed = Buffer.alloc(samples);
+        for (let i = 0; i < samples; i++) {
+          const offset = i * 6;
+          const a = combined.readInt16LE(offset);
+          const b = combined.readInt16LE(offset + 2);
+          const c = combined.readInt16LE(offset + 4);
+          compressed[i] = ulawEncode(Math.round((a + b + c) / 3));
         }
-        const late = Math.max(0, performance.now() - deadline);
-        if (late > 30) latePackets++;
-        maxLate = Math.max(maxLate, late);
-        this.sock.send(frames[i], call.remote.port, call.remote.ip);
+        call.talkRemainder = combined.subarray(samples * 6);
+        call.output = Buffer.concat([call.output, compressed]);
+        if (call.output.length > 16000) {
+          // Bounded ~2s maximum, keep newest audio rather than playing old
+          // speech late if XP cannot keep up with a provider's streaming rate.
+          call.output = call.output.subarray(call.output.length - 16000);
+          this.logger.warn('Hermes Talk RTP output queue overflow; dropped old audio');
+        }
+      } else {call.talk.destroy();return;}
+    }
+  }
+  tickTalkAudio(call) {
+    if (this.call !== call || !call.remote) return;
+    const now = performance.now();
+    // Audio clock is monotonic; a delayed JavaScript timer may send a short
+    // catch-up burst, but never allow an unbounded backlog.
+    if (now - call.packetAt > 100) call.packetAt = now;
+    for (let sent = 0; sent < 3 && call.packetAt <= now + 1; sent++) {
+      const buffered = call.output.length;
+      let marker = false;
+      let out;
+      if (buffered >= 160 && (call.outSpeaking || buffered >= 640)) {
+        out = call.output.subarray(0, 160);
+        call.output = call.output.subarray(160);
+        if (!call.outSpeaking) {marker = true; call.outSpeaking = true;}
+      } else {
+        out = Buffer.alloc(160, 0xff);
+        if (!buffered) call.outSpeaking = false;
       }
-      // The last packet is transmitted ahead of playback. Retain echo
-      // suppression until the receiver has finished the audio stream.
-      const remaining = start + frames.length * RTP_PACKET_MS - performance.now();
-      if (remaining > 0) await new Promise(resolve => setTimeout(resolve, remaining));
-      this.logger.info('Native MSN RTP playback: %d packets, max scheduling late %dms, late packets %d',
-                       frames.length, Math.round(maxLate), latePackets);
-    } finally {
-      call.micQuietUntil = Date.now() + 850;
-      call.playing = false;
+      const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);
+      call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
+      this.sock.send(packet, call.remote.port, call.remote.ip);
+      call.packetAt += RTP_PACKET_MS;
     }
   }
 }
 
 module.exports = {
   NativeCall, parseSip, parseSdp, sipResponse, parseRtp, encodeRtp,
-  ulawEncode, ulawDecode, resamplePcm8To16, requestWorker,
+  ulawEncode, ulawDecode, resamplePcm8To16, pcmuToTalk, talkFrame,
   encodeNativeSignal, decodeNativeSignal,
 };

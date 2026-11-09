@@ -4,7 +4,7 @@ This Git repository is the **entire** HermesXP plugin: the MSN platform adapter,
 the host setup tools, the versioned XP binaries, and the LAN updater. You do
 not need to clone another repository or install build tools on Windows XP.
 
-1. On the computer running Hermes, after installing/enabling this plugin:
+1. Install and enable the separate **Hermes Talk** plugin on the Hermes host. HermesXP uses the Talk-selected provider for all voice calls. Then on the computer running Hermes, after installing/enabling HermesXP:
    `bash ~/.hermes/plugins/hermes-msn/local-server/install.sh`
    (A normal unprivileged Hermes user can run the local server; optional
    privileged TLS prerequisites are explained by that installer.)

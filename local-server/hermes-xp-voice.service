@@ -1,19 +1,20 @@
 [Unit]
-Description=HermesXP paired-device voice companion (not native WLM calls)
+Description=HermesXP native MSN audio via Hermes Talk plugin
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=-__HOME__/.hermes/.env
-ExecStart=/usr/bin/python3 __REPO_ROOT__/tools/voice_gateway.py --bind __LAN_IP__
+EnvironmentFile=__HOME__/.hermes/msn-bridge.env
+EnvironmentFile=-__HOME__/.hermes/plugins/hermes-talk/.env
+ExecStart=__HERMES_BIN__ xpvoice
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-RestrictAddressFamilies=AF_INET AF_UNIX
+# Talk owns provider credentials, task state and temporary session files.
+# Unlike the removed read-only ASR gateway, it needs its own profile writable.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=default.target

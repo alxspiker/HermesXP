@@ -25,6 +25,11 @@ const TALK_MAX_PENDING = 256 * 1024;
 const RTP_PACKET_MS = 20;
 const RTP_SAMPLES_PER_PACKET = 160;
 const RTP_PREROLL_PACKETS = 4;
+// The Talk bridge and RTP sender have independent clocks. Wait for a full
+// 160ms of PCM before starting each speech burst so minor scheduling jitter
+// does not turn into alternating speech/silence on WLM's old G.711 decoder.
+const RTP_SPEECH_START_BYTES = 8 * RTP_SAMPLES_PER_PACKET;
+const RTP_MAX_CATCHUP_MS = 30;
 
 function parseSip(data) {
   if (!Buffer.isBuffer(data) || data.length > 16384 || !data.length) return null;
@@ -217,6 +222,12 @@ class NativeCall {
     this.call = null; // suppress reentrant callbacks from closing the socket
     if (old?.expiry) clearTimeout(old.expiry);
     if (old?.audioTimer) clearInterval(old.audioTimer);
+    if (old?.talk) {
+      this.logger.info('Messenger RTP audio stats: rx=%d lost=%d talk_pcm=%dms played=%dms underflows=%d timer_slips=%d max_buffer=%dms',
+        old.incomingFrames || 0, old.incomingLost || 0, old.outReceivedMs || 0,
+        old.outPlayedMs || 0, old.outputUnderflows || 0,
+        old.timerSlips || 0, old.maxBufferedMs || 0);
+    }
     if (old?.talk) old.talk.destroy();
     if (this.rendezvousTimer) clearTimeout(this.rendezvousTimer);
     this.rendezvousTimer = null;
@@ -432,6 +443,17 @@ class NativeCall {
       call.rtpSeen = true;
       this.logger.info('First native Messenger PCMU RTP audio frame received');
     }
+    // Stop duplicates and re-ordered UDP frames from reaching Talk as
+    // repeated microphone samples. A gap remains an acoustic gap, never
+    // duplicated fake speech.
+    const seq = frame.readUInt16BE(2);
+    if (call.inputSeq !== undefined) {
+      const advance = (seq - call.inputSeq + 65536) & 65535;
+      if (advance === 0 || advance >= 32768) return;
+      if (advance > 1) call.incomingLost = (call.incomingLost || 0) + advance - 1;
+    }
+    call.inputSeq = seq;
+    call.incomingFrames = (call.incomingFrames || 0) + 1;
     if (call.talkReady && call.talk && !call.talk.destroyed &&
         call.talk.writableLength < TALK_MAX_PENDING)
       call.talk.write(talkFrame('I', pcmuToTalk(payload)));
@@ -444,6 +466,13 @@ class NativeCall {
     call.readyAt = 0;
     call.outSpeaking = false;
     call.packetAt = performance.now();
+    call.outputUnderflows = 0;
+    call.timerSlips = 0;
+    call.incomingLost = 0;
+    call.incomingFrames = 0;
+    call.outReceivedMs = 0;
+    call.outPlayedMs = 0;
+    call.maxBufferedMs = 0;
     call.audioTimer = setInterval(() => this.tickTalkAudio(call), 10);
     const connection = net.connect({host: '127.0.0.1', port: TALK_BRIDGE_PORT});
     call.talk = connection;
@@ -485,6 +514,7 @@ class NativeCall {
         call.output = Buffer.alloc(0);
         call.talkRemainder = Buffer.alloc(0);
         call.outSpeaking = false;
+        call.lastOutputAt = 0;
       } else if (type === 'X') {
         this.logger.warn('Hermes Talk rejected native call (%s)',
                          payload.toString('ascii').slice(0, 100));
@@ -503,6 +533,10 @@ class NativeCall {
         }
         call.talkRemainder = combined.subarray(samples * 6);
         call.output = Buffer.concat([call.output, compressed]);
+        call.outReceivedMs += compressed.length / 8;
+        call.maxBufferedMs = Math.max(
+          call.maxBufferedMs, Math.round(call.output.length / 8));
+        call.lastOutputAt = performance.now();
         if (call.output.length > 16000) {
           // Bounded ~2s maximum, keep newest audio rather than playing old
           // speech late if XP cannot keep up with a provider's streaming rate.
@@ -524,26 +558,38 @@ class NativeCall {
   tickTalkAudio(call) {
     if (this.call !== call || !call.remote) return;
     const now = performance.now();
-    // Audio clock is monotonic; a delayed JavaScript timer may send a short
-    // catch-up burst, but never allow an unbounded backlog.
-    if (now - call.packetAt > 100) call.packetAt = now;
-    for (let sent = 0; sent < 3 && call.packetAt <= now + 1; sent++) {
-      const buffered = call.output.length;
-      let marker = false;
-      let out;
-      if (buffered >= 160 && (call.outSpeaking || buffered >= 640)) {
-        out = call.output.subarray(0, 160);
-        call.output = call.output.subarray(160);
-        if (!call.outSpeaking) {marker = true; call.outSpeaking = true;}
-      } else {
-        out = Buffer.alloc(160, 0xff);
-        if (!buffered) call.outSpeaking = false;
-      }
-      const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);
-      call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
-      this.sock.send(packet, call.remote.port, call.remote.ip);
-      call.packetAt += RTP_PACKET_MS;
+    // Old Messenger jitter buffers dislike 2-3 back-to-back RTP packets.
+    // After a scheduler stall, advance the RTP clock over missed time rather
+    // than flooding the receiver with a compressed catch-up burst.
+    if (now - call.packetAt > RTP_MAX_CATCHUP_MS) {
+      const missed = Math.max(1, Math.floor((now - call.packetAt) / RTP_PACKET_MS));
+      call.stamp = (call.stamp + missed * RTP_SAMPLES_PER_PACKET) >>> 0;
+      call.packetAt += missed * RTP_PACKET_MS;
+      call.timerSlips = (call.timerSlips || 0) + missed;
     }
+    if (call.packetAt > now + 1) return;
+    const buffered = call.output.length;
+    const staleShortReply = buffered >= 160 && call.lastOutputAt &&
+      now - call.lastOutputAt > 250;
+    let marker = false;
+    let out;
+    if (buffered >= 160 &&
+        (call.outSpeaking || buffered >= RTP_SPEECH_START_BYTES || staleShortReply)) {
+      out = call.output.subarray(0, 160);
+      call.output = call.output.subarray(160);
+      if (!call.outSpeaking) {marker = true; call.outSpeaking = true;}
+      call.outPlayedMs = (call.outPlayedMs || 0) + RTP_PACKET_MS;
+    } else {
+      out = Buffer.alloc(160, 0xff);
+      if (call.outSpeaking) {
+        call.outputUnderflows = (call.outputUnderflows || 0) + 1;
+        call.outSpeaking = false;
+      }
+    }
+    const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);
+    call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
+    this.sock.send(packet, call.remote.port, call.remote.ip);
+    call.packetAt += RTP_PACKET_MS;
   }
 }
 

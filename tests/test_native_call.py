@@ -217,6 +217,50 @@ for(let i=1;i<packets.length;i++){
 native.stop();
 """)
 
+    def test_reorder_dedup_jitter_preroll_and_no_packet_bursts(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {performance}=require('perf_hooks');
+const {NativeCall,encodeRtp,ulawEncode,parseRtp}=require('./native_call.js');
+const native=new NativeCall({
+  client:{},owner:'owner@example.invalid',host:'192.168.1.81',
+  xpHost:'192.168.1.84',token:'x'.repeat(64),
+  logger:{info(){},warn(){},error(){}},
+});
+const outbound=[], sent=[];
+native.sock.send=packet=>outbound.push(Buffer.from(packet));
+const call={remote:{ip:'192.168.1.84',port:24500},seq:5,stamp:1234,ssrc:10,
+ talkReady:true,talk:{write:data=>sent.push(data),writableLength:0,destroyed:false,destroy(){}},
+ output:Buffer.alloc(0),outSpeaking:false,packetAt:performance.now()};
+native.call=call;
+for(const n of [10,10,9,11,14]){
+ const frame=encodeRtp(Buffer.alloc(160,ulawEncode(3000)),n,n*160,12);
+ native.onRtp(frame,{address:'192.168.1.84',port:24500});
+}
+assert.equal(sent.length,3,'duplicate and reordered microphone RTP must be ignored');
+assert.equal(call.incomingLost,2,'sequence gaps must be tracked');
+// 100ms is too little to start a stable word: preserve it while sending silence.
+call.output=Buffer.alloc(160*5,ulawEncode(9000));
+native.tickTalkAudio(call);
+assert.equal(parseRtp(outbound.at(-1))[0],0xff);
+assert.equal(call.output.length,800);
+// Once 160ms is buffered, the speech begins with an RTP marker bit.
+call.output=Buffer.alloc(160*10,ulawEncode(9000));
+call.packetAt=performance.now()-10;
+native.tickTalkAudio(call);
+assert.equal(call.output.length,1440);
+assert(outbound.at(-1)[1]&0x80);
+// If a timer fires 120ms late, do not burst 3 packets at WLM.
+const count=outbound.length;
+const beforeStamp=call.stamp;
+call.packetAt=performance.now()-120;
+native.tickTalkAudio(call);
+assert.equal(outbound.length,count+1);
+assert(call.stamp>beforeStamp+160);
+assert(call.timerSlips>=4);
+native.stop();
+""")
+
 
 if __name__ == '__main__':
     unittest.main()

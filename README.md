@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.1)
+### Native Messenger calls (v0.6.2)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -88,6 +88,14 @@ Much louder deliberate speech can still interrupt; this is a simple gate,
 not acoustic echo cancellation. Set Talk's `TALK_ECHO_GATE=off` only when
 using headphones or testing microphone behavior. Talk remains the sole owner
 of provider selection, conversation and tools.
+
+**RTP smoothing (v0.6.2):** The Messenger RTP sender now requires an initial
+160ms speech buffer and never emits a catch-up burst after an event-loop stall;
+it advances timestamps over missed time instead. Duplicate/out-of-order
+microphone RTP is ignored. At hangup the host logs input packet loss,
+timer slips and output underflows as a concise, content-free diagnostic,
+so a future real-call problem can be measured rather than guessed.
+Provider behavior and response creation remain owned by Hermes Talk.
 
 To diagnose:
 

@@ -67,7 +67,33 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.2)
+### Native Messenger calls (v0.7.3)
+
+**Optional RTP packetization (v0.7.3).** Windows XP audio hardware and
+Messenger's internal receiver can be sensitive to extremely short playback
+queues. The bridge supports either standard 20 ms PCMU packets (default)
+or an experimental 40 ms PCMU packet size without changing sample rate or
+codec. Use the host-only environment setting:
+
+    HERMES_MSN_RTP_PACKET_MS=40
+
+Then restart the MSN bridge. The SDP advertises the chosen packetization,
+and sender packet deadlines, sequence numbers, and RTP timestamps follow it.
+Incomplete 20 ms speech tails are padded with PCMU silence rather than
+discarded. Change this back to 20 if a Messenger client cannot play 40 ms
+packets. This controls outbound Hermes-to-XP media only; Messenger may
+continue sending 20 ms packets to Hermes.
+
+**Evidence and limits:** A controlled six-second continuous PCM test passed
+through Talk's Python output, Node's PCMU converter, and the 20 ms RTP
+scheduler with all 300 speech packets continuous. On an MSI Wind U100 XP
+machine, a separate 8 kHz/16-bit silent waveOut timing test completed 598
+of approximately 600 20 ms frames with an 80–160 ms playback queue, but
+only 431 with a 40 ms queue (repeated). That indicates a severe sensitivity
+to short XP waveOut buffer queues; it does not establish how Messenger
+internally buffers RTP or guarantee that 40 ms PCMU packetization helps.
+The sound-card test is in xp-client/diagnostics/waveout-timing.c. It neither
+records user audio nor changes XP settings.
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP

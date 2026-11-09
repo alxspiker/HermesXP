@@ -192,15 +192,20 @@ function parseRtp(datagram) {
 }
 
 class NativeCall {
-  constructor({client, owner, host, xpHost, token, port = DEFAULT_PORT, logger = console}) {
+  constructor({client, owner, host, xpHost, token, port = DEFAULT_PORT,
+               packetMs = RTP_PACKET_MS, logger = console}) {
     if (net.isIP(host) !== 4 || net.isIP(xpHost) !== 4)
       throw new Error('native call requires concrete host and XP IPv4 addresses');
+    if (![20, 40].includes(packetMs))
+      throw new Error('native RTP packet duration must be 20 or 40 ms');
     this.client = client;
     this.owner = owner;
     this.host = host;
     this.xpHost = xpHost;
     this.token = token;
     this.port = port;
+    this.packetMs = packetMs;
+    this.packetBytes = packetMs * 8; // PCMU 8000 Hz, 1 byte per sample
     this.logger = logger;
     this.sock = dgram.createSocket('udp4');
     this.call = null;
@@ -234,12 +239,12 @@ class NativeCall {
   logCallStats(call, kind = 'periodic') {
     this.logger.info(
       'Messenger RTP %s: incoming=%d missing=%d talk_pcm=%dms played=%dms ' +
-      'underflows=%d clock_skips=%d spacing_lt15ms=%d spacing_gt25ms=%d ' +
+      'underflows=%d clock_skips=%d packet_ms=%d spacing_early=%d spacing_late=%d ' +
       'max_gap_ms=%d queued=%dms peak_buffer=%dms interruptions=%d ' +
       'resets_during_speech=%d discarded_pcm=%dms',
       kind, call.incomingFrames || 0, call.incomingLost || 0,
       Math.round(call.outReceivedMs || 0), Math.round(call.outPlayedMs || 0),
-      call.outputUnderflows || 0, call.timerSlips || 0,
+      call.outputUnderflows || 0, call.timerSlips || 0, this.packetMs,
       call.shortPacketIntervals || 0, call.longPacketIntervals || 0,
       Math.round(call.maxPacketGapMs || 0),
       Math.round((call.output?.length || 0) / 8),
@@ -258,6 +263,7 @@ class NativeCall {
       'v=0', 'o=HermesXP 0 0 IN IP4 ' + local, 's=HermesXP Voice',
       'b=CT:99980', 't=0 0', 'm=audio ' + this.port + ' RTP/AVP 0',
       'c=IN IP4 ' + local, 'a=rtpmap:0 PCMU/8000',
+      'a=ptime:' + this.packetMs,
       'a=encryption:rejected', '',
     ].join('\r\n');
     const sip = [
@@ -424,7 +430,7 @@ class NativeCall {
         'v=0', 'o=HermesXP 0 0 IN IP4 ' + this.host, 's=HermesXP',
         'c=IN IP4 ' + this.host, 't=0 0',
         'm=audio ' + this.port + ' RTP/AVP 0',
-        'a=rtpmap:0 PCMU/8000', 'a=ptime:20', 'a=sendrecv', '',
+        'a=rtpmap:0 PCMU/8000', 'a=ptime:' + this.packetMs, 'a=sendrecv', '',
       ].join('\r\n');
       this.call = session;
       session.expiry = setTimeout(() => this.closeCall(), MAX_CALL_MS);
@@ -479,7 +485,7 @@ class NativeCall {
     call.output = Buffer.alloc(0);
     call.readyAt = 0;
     call.outSpeaking = false;
-    call.packetAt = performance.now() + RTP_PACKET_MS;
+    call.packetAt = performance.now() + this.packetMs;
     call.lastPacketSentAt = null;
     call.shortPacketIntervals = 0;
     call.longPacketIntervals = 0;
@@ -600,7 +606,7 @@ class NativeCall {
     // polling for it with a second, unrelated clock.
     const delay = call.remote
       ? Math.max(1, call.packetAt - performance.now())
-      : RTP_PACKET_MS;
+      : this.packetMs;
     call.audioTimer = setTimeout(() => {
       if (this.call !== call) return;
       this.tickTalkAudio(call);
@@ -613,10 +619,10 @@ class NativeCall {
     // Old Messenger jitter buffers dislike 2-3 back-to-back RTP packets.
     // After a scheduler stall, advance the RTP clock over missed time rather
     // than flooding the receiver with a compressed catch-up burst.
-    if (now - call.packetAt > RTP_MAX_CATCHUP_MS) {
-      const missed = Math.max(1, Math.floor((now - call.packetAt) / RTP_PACKET_MS));
-      call.stamp = (call.stamp + missed * RTP_SAMPLES_PER_PACKET) >>> 0;
-      call.packetAt += missed * RTP_PACKET_MS;
+    if (now - call.packetAt > Math.max(RTP_MAX_CATCHUP_MS, this.packetMs * 1.5)) {
+      const missed = Math.max(1, Math.floor((now - call.packetAt) / this.packetMs));
+      call.stamp = (call.stamp + missed * this.packetBytes) >>> 0;
+      call.packetAt += missed * this.packetMs;
       call.timerSlips = (call.timerSlips || 0) + missed;
     }
     if (call.packetAt > now + 1) return;
@@ -625,14 +631,23 @@ class NativeCall {
       now - call.lastOutputAt > 250;
     let marker = false;
     let out;
-    if (buffered >= 160 &&
+    if (buffered >= this.packetBytes &&
         (call.outSpeaking || buffered >= RTP_SPEECH_START_BYTES || staleShortReply)) {
-      out = call.output.subarray(0, 160);
-      call.output = call.output.subarray(160);
+      out = call.output.subarray(0, this.packetBytes);
+      call.output = call.output.subarray(this.packetBytes);
       if (!call.outSpeaking) {marker = true; call.outSpeaking = true;}
-      call.outPlayedMs = (call.outPlayedMs || 0) + RTP_PACKET_MS;
+      call.outPlayedMs = (call.outPlayedMs || 0) + this.packetMs;
+    } else if (buffered >= 160 && (call.outSpeaking || staleShortReply)) {
+      // A 40ms packet can have a 20ms final fragment, and a short reply
+      // can consist of a single fragment. Pad once with PCMU silence
+      // instead of silently dropping its last (or only) 20ms of speech.
+      out = Buffer.alloc(this.packetBytes, 0xff);
+      call.output.copy(out, 0, 0, buffered);
+      call.output = Buffer.alloc(0);
+      if (!call.outSpeaking) {marker = true; call.outSpeaking = true;}
+      call.outPlayedMs = (call.outPlayedMs || 0) + buffered / 8;
     } else {
-      out = Buffer.alloc(160, 0xff);
+      out = Buffer.alloc(this.packetBytes, 0xff);
       if (call.outSpeaking) {
         call.outputUnderflows = (call.outputUnderflows || 0) + 1;
         // A 20-100ms provider/OS gap is not the end of an utterance. If we
@@ -644,16 +659,18 @@ class NativeCall {
       }
     }
     const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);
-    call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
+    call.stamp = (call.stamp + this.packetBytes) >>> 0;
     this.sock.send(packet, call.remote.port, call.remote.ip);
     if (call.lastPacketSentAt != null) {
       const gap = now - call.lastPacketSentAt;
-      if (gap < 15) call.shortPacketIntervals = (call.shortPacketIntervals || 0) + 1;
-      if (gap > 25) call.longPacketIntervals = (call.longPacketIntervals || 0) + 1;
+      if (gap < this.packetMs - 5)
+        call.shortPacketIntervals = (call.shortPacketIntervals || 0) + 1;
+      if (gap > this.packetMs + 5)
+        call.longPacketIntervals = (call.longPacketIntervals || 0) + 1;
       call.maxPacketGapMs = Math.max(call.maxPacketGapMs || 0, gap);
     }
     call.lastPacketSentAt = now;
-    call.packetAt += RTP_PACKET_MS;
+    call.packetAt += this.packetMs;
   }
 }
 

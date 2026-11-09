@@ -347,6 +347,58 @@ try {
 }
 """)
 
+    def test_configurable_40ms_rtp_preserves_speech_tails_and_timestamps(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {performance}=require('perf_hooks');
+const {NativeCall,ulawEncode,parseRtp}=require('./native_call.js');
+const packets=[];
+const native=new NativeCall({
+ client:{}, owner:'owner@example.invalid', host:'127.0.0.1',
+ xpHost:'127.0.0.2',token:'x'.repeat(64),packetMs:40,
+ logger:{info(){},warn(){},error(){}}
+});
+native.sock.send=frame=>packets.push(Buffer.from(frame));
+const call={remote:{ip:'127.0.0.2',port:9000},seq:0,stamp:1000,ssrc:5,
+ packetAt:performance.now()-1,output:Buffer.alloc(320*21,ulawEncode(9000)),
+ outSpeaking:false,lastOutputAt:performance.now()};
+native.call=call;
+native.tickTalkAudio(call);
+assert.equal(packets.length,1);
+assert.equal(packets[0].length,332,'40ms PCMU is 320 bytes + RTP header');
+assert.equal(packets[0].readUInt32BE(4),1000);
+assert.equal(call.stamp,1320);
+assert(packets[0][1]&0x80,'first voiced packet should carry RTP marker');
+assert.equal(call.outPlayedMs,40);
+assert.equal(call.output.length,320*20);
+call.output=Buffer.alloc(160,ulawEncode(9000));
+call.packetAt=performance.now()-1;
+native.tickTalkAudio(call);
+assert.equal(packets.length,2);
+assert.equal(parseRtp(packets[1]).length,320);
+assert.equal(parseRtp(packets[1])[0],ulawEncode(9000));
+assert.equal(parseRtp(packets[1])[159],ulawEncode(9000));
+assert.equal(parseRtp(packets[1])[160],0xff,'last 20ms padded with silence');
+assert.equal(call.outPlayedMs,60,'count only actual voice audio');
+assert.equal(call.output.length,0);
+assert.equal(call.stamp,1640);
+// Very short responses still play after the existing stale-response delay.
+call.outSpeaking=false;
+call.output=Buffer.alloc(160,ulawEncode(9000));
+call.lastOutputAt=performance.now()-300;
+call.packetAt=performance.now()-1;
+native.tickTalkAudio(call);
+assert.equal(call.output.length,0);
+assert.equal(call.outPlayedMs,80);
+assert(packets[2][1]&0x80,'short reply starts its own marked talkspurt');
+assert.throws(()=>new NativeCall({
+ client:{},owner:'owner@example.invalid',host:'127.0.0.1',
+ xpHost:'127.0.0.2',token:'x'.repeat(64),packetMs:60,
+ logger:{info(){},warn(){},error(){}}
+}),/20 or 40/);
+native.stop();
+""")
+
 
 if __name__ == '__main__':
     unittest.main()

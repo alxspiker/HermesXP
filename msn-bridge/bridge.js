@@ -100,12 +100,13 @@ if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
   };
   const device = getDevice();
   const host = device && interfaceForXP(device.host, process.env.HERMES_MSN_NATIVE_IP);
+  const packetMs = Number(process.env.HERMES_MSN_RTP_PACKET_MS || 20);
   if (!host || !device) {
     console.error('Native MSN calling needs paired XP on a reachable LAN interface');
     process.exit(2);
   }
   nativeCall = new NativeCall({
-    client, owner, host, xpHost: device.host, token,
+    client, owner, host, xpHost: device.host, token, packetMs,
   });
   nativeCall.start();
   client.on('native_signal', signal => nativeCall.onSignal(signal));
@@ -122,7 +123,7 @@ if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
     console.info('HermesXP LAN route changed; reinitializing native SIP/RTP peer');
     nativeCall.stop();
     nativeCall = new NativeCall({
-      client, owner, host: currentHost, xpHost: current.host, token,
+      client, owner, host: currentHost, xpHost: current.host, token, packetMs,
     });
     nativeCall.start();
   }, 3000).unref();

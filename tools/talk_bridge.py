@@ -47,6 +47,7 @@ MAX_TOOL_PROMPT = 4000
 MAX_TOOL_OUTPUT = 5000
 MAX_TOOL_CALLS = 12
 HERMES_TOOL_TIMEOUT = 180
+MAX_TALK_RECONNECTS = 3
 
 
 class HermesVoiceExecution:
@@ -310,6 +311,12 @@ class SocketAudio:
             self.connection.sendall(frame(kind, payload))
 
     def start(self):
+        if self.active.is_set():
+            # A transient Realtime session reconnect must reuse the one
+            # authenticated MSN TCP/audio transport. Never start another pair
+            # of reader/writer threads, or playback will race and stutter.
+            self.send(b"R")
+            return
         self.active.set()
         self.connection.settimeout(None)
         for target in (self._read, self._write):
@@ -328,6 +335,7 @@ class SocketAudio:
         for thread in self.threads:
             if thread is not threading.current_thread():
                 thread.join(timeout=1)
+
 
     def _read(self):
         try:
@@ -512,6 +520,26 @@ class SocketAudio:
                 break
 
 
+class SessionAudioView:
+    """Keep one authenticated MSN audio leg across provider reconnects.
+
+    Talk can stop a provider session; only the outer run_call owns the
+    underlying media socket and its reader/writer threads.
+    """
+
+    def __init__(self, audio):
+        self.audio = audio
+
+    def __getattr__(self, name):
+        return getattr(self.audio, name)
+
+    def start(self):
+        self.audio.start()
+
+    def stop(self):
+        return None
+
+
 async def run_call(connection: socket.socket):
     """Use Talk's registered provider and approved Hermes task execution."""
     try:
@@ -545,20 +573,47 @@ async def run_call(connection: socket.socket):
         raise RuntimeError(
             "Choose either HERMES_XP_TALK_TARGET or HERMES_XP_TALK_DIRECT_TOOLS"
         )
-    attachment = HermesVoiceExecution() if direct else None
-    if not task and attachment is None:
+    if not task and not direct:
         raise RuntimeError(
             "HermesXP voice must use an authorized Talk task or direct Hermes tools"
         )
+    session_audio = SessionAudioView(audio)
     try:
-        return await talk_cli.run_talk_session(
-            audio=audio, lane="cli", keyboard_control=False,
-            **({"host_execution_attachment": attachment} if attachment else {}),
-            **({"native_task": task} if task else {}),
-        )
+        for attempt in range(MAX_TALK_RECONNECTS + 1):
+            attachment = HermesVoiceExecution() if direct else None
+            refusals = []
+            try:
+                result = await talk_cli.run_talk_session(
+                    audio=session_audio, lane="cli", keyboard_control=False,
+                    on_refusal=refusals.append,
+                    **({"host_execution_attachment": attachment} if attachment else {}),
+                    **({"native_task": task} if task else {}),
+                )
+            finally:
+                if attachment is not None:
+                    attachment.close()
+            if not audio.active.is_set() or refusals:
+                return result
+            if attempt == MAX_TALK_RECONNECTS:
+                LOG.warning(
+                    "Hermes Talk stopped %d times while the MSN call was still "
+                    "connected; ending call rather than looping forever",
+                    MAX_TALK_RECONNECTS + 1,
+                )
+                return result or 1
+            LOG.warning(
+                "Hermes Talk provider session stopped while Messenger is still "
+                "connected (result=%s); reconnecting (%d/%d)",
+                result, attempt + 1, MAX_TALK_RECONNECTS,
+            )
+            # Drop orphaned provider output, not the authenticated TCP leg.
+            # A new provider has its own item IDs and cannot continue a
+            # partially spoken old response or accept old microphone input.
+            audio.drain_playback()
+            audio._clear_input()
+            await asyncio.sleep(min(1 + attempt, 3))
+        return 1
     finally:
-        if attachment is not None:
-            attachment.close()
         audio.stop()
 
 

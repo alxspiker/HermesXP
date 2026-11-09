@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.6.7
-description: "Native Messenger audio via Hermes Talk with monotonic deadline-paced 20ms RTP packets, stable 800ms speech buffering and direct Hermes tools."
+version: 0.6.8
+description: "Native Messenger voice with deadline-paced RTP, authenticated Hermes tools and bounded provider-session reconnect without hanging up XP."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process

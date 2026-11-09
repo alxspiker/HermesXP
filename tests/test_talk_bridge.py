@@ -149,6 +149,7 @@ class TalkBridgeTests(unittest.TestCase):
             captured.update(kwargs)
             kwargs["audio"].start()
             self.assertEqual(bridge.receive(b), (b"R", b""))
+            kwargs["on_refusal"]("test-session-complete")
             return 0
 
         fake = types.ModuleType("hermes_plugins.hermes_talk")
@@ -172,6 +173,48 @@ class TalkBridgeTests(unittest.TestCase):
                 {tool["name"] for tool in captured["host_execution_attachment"].tool_definitions()},
                 {"hermes_execute"},
             )
+        finally:
+            a.close()
+            b.close()
+
+    def test_provider_reconnect_keeps_single_audio_thread_pair_and_same_socket(self):
+        a, b = socket.socketpair()
+        b.settimeout(3)
+        calls = []
+
+        async def fake_talk(**kwargs):
+            media = kwargs["audio"]
+            media.start()
+            msg = bridge.receive(b)
+            if calls:
+                self.assertEqual(msg, (b"D", b""))
+                msg = bridge.receive(b)
+            self.assertEqual(msg, (b"R", b""))
+            self.assertTrue(media.active.is_set())
+            self.assertEqual(len(media.audio.threads), 2)
+            calls.append(media)
+            # This only ends the provider's session, never WLM's call.
+            media.stop()
+            if len(calls) == 2:
+                kwargs["on_refusal"]("test-finished")
+            return 0 if len(calls) == 2 else 1
+
+        fake = types.ModuleType("hermes_plugins.hermes_talk")
+        fake.talk_cli = types.SimpleNamespace(run_talk_session=fake_talk)
+        package = types.ModuleType("hermes_plugins")
+        package.__path__ = []
+        try:
+            with patch.dict(sys.modules, {
+                "hermes_plugins": package, "hermes_plugins.hermes_talk": fake,
+            }), patch.dict(os.environ, {
+                "TALK_VOICE_MODE": "native", "HERMES_XP_TALK_DIRECT_TOOLS": "1",
+            }, clear=False):
+                os.environ.pop("HERMES_XP_TALK_TARGET", None)
+                self.assertEqual(asyncio.run(bridge.run_call(a)), 0)
+            self.assertEqual(len(calls), 2)
+            self.assertIs(calls[0].audio, calls[1].audio)
+            self.assertEqual(len(calls[0].audio.threads), 2)
+            self.assertFalse(calls[0].audio.active.is_set())
         finally:
             a.close()
             b.close()

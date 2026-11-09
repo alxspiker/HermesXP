@@ -295,14 +295,6 @@ class SocketAudio:
         self.echo_gate = os.environ.get("TALK_ECHO_GATE", "").strip().lower() not in {
             "0", "off", "false", "no", "disabled"
         }
-        # WLM 2009 on RUITER has no reliable acoustic echo cancellation.
-        # Its speaker output can leak back into the microphone loudly
-        # enough to pass an amplitude-based gate, causing Realtime to
-        # interrupt its own answer. Use half-duplex by default. A paired
-        # operator with headphones can opt back into live interruption.
-        self.allow_barge_in = os.environ.get(
-            "HERMES_XP_TALK_BARGE_IN", ""
-        ).strip().lower() in {"1", "true", "on", "yes"}
         # The XP sound card's microphone is physically close to its speaker.
         # Favor ignoring playback leakage while leaving room for a clearly
         # louder human interruption. Talk remains responsible for VAD itself.
@@ -351,11 +343,8 @@ class SocketAudio:
                     echo_level = self.output_level
                 if paused:
                     continue
-                if self.echo_gate and playing and (
-                    not self.allow_barge_in
-                    or rms(data) < max(
-                        self.echo_threshold, echo_level * self.echo_ratio
-                    )
+                if self.echo_gate and playing and rms(data) < max(
+                    self.echo_threshold, echo_level * self.echo_ratio
                 ):
                     # Substitute silence rather than skipping the frame.
                     # Realtime VAD needs continuous sample timing: deleting

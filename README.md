@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.5)
+### Native Messenger calls (v0.6.6)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -148,25 +148,14 @@ now handles real Hermes tasks; the redundant `get_current_time` tool
 has been removed from HermesXP and from the matching Talk fork 0.22.4+.
 More buffering adds about 400ms to the start of long answers.
 
-**Speech continuity (v0.6.5):** The next real call showed only 4 playout
-underflows (down from 48), no RTP clock skips and no lost inbound frames,
-but it still registered 6 playback interruptions. An amplitude-based echo
-gate can mistake the XP speaker's loud reflected voice for a new operator
-turn. During Talk playback the paired MSN microphone now streams silence
-instead of live audio by default, preserving timing while preventing the
-assistant from interrupting itself. Speak after Hermes finishes; this is
-**half-duplex audio** rather than acoustic echo cancellation. To opt back
-into barge-in when using headphones, set `HERMES_XP_TALK_BARGE_IN=1` in
-the private `~/.hermes/msn-bridge.env` and restart
-`hermes-xp-voice.service`.
-
-The RTP sender also delays release of short/incomplete provider bursts
-until the 800ms buffer is ready or 850ms have elapsed since the first PCM,
-instead of prematurely releasing them after only 250ms of idle time.
-For an isolated 20–40ms speech starvation, it replays a rapidly faded
-copy of the preceding PCMU frame rather than an abrupt 20ms silence gap;
-longer missing audio still produces silence. The periodic
-`Messenger RTP` diagnostic includes a `concealed=` count.
+**Audio rollback (v0.6.6):** On RUITER, the v0.6.5 changes made playback
+perceptibly worse despite low RTP underflow counts. Restored the
+v0.6.4 native-call and PCM-adapter behavior: no forced half-duplex mode,
+no faded replay of missing samples, and no 850ms wait before short replies.
+The working foreground `hermes_execute` tool, the 800ms RTP buffer, echo
+timing preservation, and periodic content-free RTP diagnostics remain.
+The regression's low underflow count did not establish better perceived
+audio, and these changes are not treated as a permanent choppiness fix.
 
 To diagnose:
 

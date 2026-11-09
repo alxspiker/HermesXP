@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.8)
+### Native Messenger calls (v0.6.9)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -184,6 +184,19 @@ may need restating. Hermes Talk custom fork v0.22.5+ reports the primary
 task-exit reason and cancels pending foreground work during cleanup rather
 than masking it with a generic six-second timeout. Both changes preserve
 the v0.6.7 RTP packet pacing and the existing Hermes execution tool.
+
+**Audio and call diagnostics (v0.6.9):** On a real v0.6.8 call, Hermes'
+20ms RTP sender stayed within 15–25ms timing throughout, with zero
+incoming packet loss, but Talk sent 13 playback-clear events and the
+sender experienced six brief output underflows. A playback-clear event
+does not necessarily mean audible speech was cut off; it may reset an
+empty buffer on a normal operator turn. The periodic and final statistics
+now separately show resets during active/queued speech and milliseconds
+of buffered output actually discarded by those resets. Audio encoding,
+volume, buffering, echo gating and packet timing are intentionally
+unchanged. The matching Talk custom fork v0.22.6+ fixes a real
+host-tool-batch cleanup crash that otherwise closed MSN unexpectedly
+when provider recovery was attempted.
 
 To diagnose:
 

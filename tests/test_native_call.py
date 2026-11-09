@@ -217,6 +217,40 @@ for(let i=1;i<packets.length;i++){
 native.stop();
 """)
 
+    def test_diagnostic_separates_audible_speech_reset_from_empty_turn_clear(self):
+        """The Realtime D event is not always an audible interruption."""
+        self.run_js(r"""
+const assert=require('assert');
+const {NativeCall,talkFrame}=require('./native_call.js');
+const logged=[];
+const native=new NativeCall({
+ client:{},owner:'owner@example.invalid',host:'127.0.0.1',
+ xpHost:'127.0.0.2',token:'x'.repeat(64),
+ logger:{info:(...args)=>logged.push(args),warn(){},error(){}}
+});
+const call={
+ remote:{ip:'127.0.0.2',port:1234},output:Buffer.alloc(0),
+ talkIncoming:Buffer.alloc(0),talkRemainder:Buffer.alloc(0),
+ outSpeaking:false
+};
+native.call=call;
+native.onTalkData(call,talkFrame('D'));
+assert.equal(call.interruptions,1);
+assert.equal(call.resetsDuringSpeech||0,0);
+assert.equal(call.discardedPcmMs||0,0);
+call.output=Buffer.alloc(160*15,0x7f); // 300ms queued speech
+call.outSpeaking=true;
+native.onTalkData(call,talkFrame('D'));
+assert.equal(call.interruptions,2);
+assert.equal(call.resetsDuringSpeech,1);
+assert.equal(call.discardedPcmMs,300);
+assert.equal(call.output.length,0);
+native.logCallStats(call);
+assert(logged.at(-1)[0].includes('resets_during_speech=%d discarded_pcm=%dms'));
+assert.deepEqual(logged.at(-1).slice(-2),[1,300]);
+native.stop();
+""")
+
     def test_reorder_dedup_jitter_preroll_and_no_packet_bursts(self):
         self.run_js(r"""
 const assert=require('assert');

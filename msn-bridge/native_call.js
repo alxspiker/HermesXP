@@ -235,14 +235,16 @@ class NativeCall {
     this.logger.info(
       'Messenger RTP %s: incoming=%d missing=%d talk_pcm=%dms played=%dms ' +
       'underflows=%d clock_skips=%d spacing_lt15ms=%d spacing_gt25ms=%d ' +
-      'max_gap_ms=%d queued=%dms peak_buffer=%dms interruptions=%d',
+      'max_gap_ms=%d queued=%dms peak_buffer=%dms interruptions=%d ' +
+      'resets_during_speech=%d discarded_pcm=%dms',
       kind, call.incomingFrames || 0, call.incomingLost || 0,
       Math.round(call.outReceivedMs || 0), Math.round(call.outPlayedMs || 0),
       call.outputUnderflows || 0, call.timerSlips || 0,
       call.shortPacketIntervals || 0, call.longPacketIntervals || 0,
       Math.round(call.maxPacketGapMs || 0),
       Math.round((call.output?.length || 0) / 8),
-      call.maxBufferedMs || 0, call.interruptions || 0);
+      call.maxBufferedMs || 0, call.interruptions || 0,
+      call.resetsDuringSpeech || 0, Math.round(call.discardedPcmMs || 0));
   }
   sendSignal(type, payload) {
     this.client.sendNativeSignal(this.owner, type, payload);
@@ -490,6 +492,8 @@ class NativeCall {
     call.outPlayedMs = 0;
     call.maxBufferedMs = 0;
     call.interruptions = 0;
+    call.resetsDuringSpeech = 0;
+    call.discardedPcmMs = 0;
     this.scheduleTalkAudio(call);
     // WLM 2009 does not always deliver SIP BYE when its call window closes.
     // Periodic content-free stats remain available even if the call outlives
@@ -535,6 +539,13 @@ class NativeCall {
         this.logger.info('Hermes Talk PCM bridge ready');
       } else if (type === 'D') {
         // Hermes Talk owns interruption/truncation decisions.
+        // Counting every D as an audible interruption is misleading: Talk
+        // may clear empty queues when normal VAD turns start. Track only
+        // speech-active resets and the actual buffered audio discarded.
+        if (call.outSpeaking || call.output.length >= 160)
+          call.resetsDuringSpeech = (call.resetsDuringSpeech || 0) + 1;
+        call.discardedPcmMs = (call.discardedPcmMs || 0)
+          + call.output.length / 8;
         call.interruptions = (call.interruptions || 0) + 1;
         call.output = Buffer.alloc(0);
         call.talkRemainder = Buffer.alloc(0);

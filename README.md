@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.0)
+### Native Messenger calls (v0.6.1)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -75,6 +75,19 @@ requirements or support; inspect its diagnostics after upgrading.
   Windows Live Messenger is still an experimental G.711 endpoint; its speaker
   quality, jitter handling and echo cancellation have not been proven across
   every XP sound card and provider.
+
+**Audio pacing and echo fix (v0.6.1):** Hermes Talk can produce speech much
+faster than real time. The host audio adapter now splits that output into
+20ms PCM packets, sends at a monotonic clock rate with an initial 80ms
+jitter-buffer preroll, and keeps up to 20 seconds of provider speech queued
+without flooding the Messenger RTP bridge. The earlier unpaced forwarding
+caused repeatedly logged two-second queue overflows and clipped speech.
+During provider playback, the XP microphone path uses an acoustic level gate
+to reduce speaker feedback into Talk and prevent repeated false turn starts.
+Much louder deliberate speech can still interrupt; this is a simple gate,
+not acoustic echo cancellation. Set Talk's `TALK_ECHO_GATE=off` only when
+using headphones or testing microphone behavior. Talk remains the sole owner
+of provider selection, conversation and tools.
 
 To diagnose:
 

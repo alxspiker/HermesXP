@@ -506,8 +506,17 @@ class NativeCall {
         if (call.output.length > 16000) {
           // Bounded ~2s maximum, keep newest audio rather than playing old
           // speech late if XP cannot keep up with a provider's streaming rate.
+          call.droppedAudioBytes = (call.droppedAudioBytes || 0) +
+            (call.output.length - 16000);
           call.output = call.output.subarray(call.output.length - 16000);
-          this.logger.warn('Hermes Talk RTP output queue overflow; dropped old audio');
+          // Flooding the journal itself once caused additional event-loop
+          // delays and more choppy RTP. Report a bounded summary instead.
+          if (!call.lastOverflowReport || Date.now() - call.lastOverflowReport >= 2000) {
+            this.logger.warn('Hermes Talk RTP audio backlog; dropped %d bytes since last report',
+                             call.droppedAudioBytes);
+            call.droppedAudioBytes = 0;
+            call.lastOverflowReport = Date.now();
+          }
         }
       } else {call.talk.destroy();return;}
     }

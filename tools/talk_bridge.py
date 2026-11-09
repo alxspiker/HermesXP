@@ -16,20 +16,36 @@ import asyncio
 import hmac
 import json
 import logging
+import math
 import os
 import queue
 import socket
 import struct
 import threading
+import time
+from array import array
 from dataclasses import dataclass
 from typing import ClassVar
 
 LOG = logging.getLogger("hermesxp.talk")
 PORT = 18771
 MAX_FRAME = 256 * 1024
-MAX_QUEUE = 128
+MAX_INPUT_QUEUE = 128
 SAMPLE_RATE = 24_000
 PCM_BYTES_PER_SECOND = SAMPLE_RATE * 2
+FRAME_BYTES = 960  # 20 ms of 24 kHz mono PCM16; maps to one PCMU/8000 RTP packet
+MAX_PLAYBACK_BYTES = PCM_BYTES_PER_SECOND * 20
+PLAYBACK_PREROLL_FRAMES = 4
+
+
+def rms(pcm: bytes) -> float:
+    if not pcm or len(pcm) & 1:
+        return 0.0
+    data = array("h")
+    data.frombytes(pcm)
+    if struct.pack("=H", 1) != b"\x01\0":
+        data.byteswap()
+    return min(1.0, math.sqrt(sum(v * v for v in data) / len(data)) / 32768)
 
 
 def frame(kind: bytes, data: bytes = b"") -> bytes:
@@ -70,8 +86,11 @@ class SocketAudio:
     def __init__(self, connection: socket.socket, *, disconnected=None):
         self.connection = connection
         self.disconnected = disconnected
-        self.input = queue.Queue(maxsize=MAX_QUEUE)
-        self.output = queue.Queue(maxsize=MAX_QUEUE)
+        self.input = queue.Queue(maxsize=MAX_INPUT_QUEUE)
+        # Talk providers often synthesize multiple seconds of audio in a
+        # fraction of a second. Frame it here and send at REAL playback speed
+        # instead of flooding Messenger's 2s jitter buffer.
+        self.output = queue.Queue(maxsize=MAX_PLAYBACK_BYTES // FRAME_BYTES + 1)
         self.lock = threading.Lock()
         self.active = threading.Event()
         self.paused = False
@@ -80,6 +99,17 @@ class SocketAudio:
         self.played_bytes = 0
         self.queued_bytes = 0
         self.item_id = None
+        self.output_generation = 0
+        self.output_level = 0.0
+        self.output_at = 0.0
+        self.echo_gate = os.environ.get("TALK_ECHO_GATE", "").strip().lower() not in {
+            "0", "off", "false", "no", "disabled"
+        }
+        # The XP sound card's microphone is physically close to its speaker.
+        # Favor ignoring playback leakage while leaving room for a clearly
+        # louder human interruption. Talk remains responsible for VAD itself.
+        self.echo_threshold = 0.08
+        self.echo_ratio = 1.4
         self.write_lock = threading.Lock()
         self.threads = []
 
@@ -115,7 +145,15 @@ class SocketAudio:
                     raise ValueError("invalid messenger audio frame")
                 with self.lock:
                     paused = self.paused
+                    playing = self.queued_bytes > 0 or (
+                        time.monotonic() - self.output_at < 0.35
+                    )
+                    echo_level = self.output_level
                 if paused:
+                    continue
+                if self.echo_gate and playing and rms(data) < max(
+                    self.echo_threshold, echo_level * self.echo_ratio
+                ):
                     continue
                 try:
                     self.input.put_nowait(data)
@@ -135,13 +173,38 @@ class SocketAudio:
                 self.disconnected()
 
     def _write(self):
+        packet_index = 0
+        started_at = None
         try:
             while self.active.is_set():
                 try:
-                    item_id, data = self.output.get(timeout=0.1)
+                    generation, item_id, data = self.output.get(timeout=0.1)
                 except queue.Empty:
+                    packet_index = 0
+                    started_at = None
                     continue
+                if started_at is None:
+                    started_at = time.monotonic()
+                deadline = started_at + max(
+                    0, packet_index - PLAYBACK_PREROLL_FRAMES + 1
+                ) * 0.02
+                while self.active.is_set() and time.monotonic() < deadline:
+                    time.sleep(min(0.005, deadline - time.monotonic()))
+                # When the process stalls, don't emit old audio at an
+                # unbounded catch-up rate. Re-align to the current clock.
+                if time.monotonic() - deadline > 0.1:
+                    started_at = time.monotonic() - max(
+                        0, packet_index - PLAYBACK_PREROLL_FRAMES + 1
+                    ) * 0.02
                 with self.lock:
+                    if generation != self.output_generation:
+                        # A Talk cancellation invalidated this in-flight
+                        # packet. D flushes any already transmitted packets.
+                        self.queued_bytes -= len(data)
+                        self.discarded += len(data)
+                        packet_index = 0
+                        started_at = None
+                        continue
                     self.queued_bytes -= len(data)
                 self.send(b"O", data)
                 with self.lock:
@@ -150,6 +213,9 @@ class SocketAudio:
                         self.played_bytes = 0
                     self.played_bytes += len(data)
                     self.consumed += len(data)
+                    self.output_level = rms(data)
+                    self.output_at = time.monotonic()
+                packet_index += 1
         except (ConnectionError, OSError, ValueError):
             self.active.clear()
             if self.disconnected is not None:
@@ -168,26 +234,26 @@ class SocketAudio:
             return
         if len(pcm) % 2 or len(pcm) + 1 > MAX_FRAME:
             raise ValueError("invalid Talk playback audio")
-        try:
-            self.output.put_nowait((item_id, bytes(pcm)))
-        except queue.Full:
-            # Backpressure: never buffer seconds of outdated output.
-            try:
-                old_id, old = self.output.get_nowait()
-                with self.lock:
-                    self.queued_bytes -= len(old)
-                    self.discarded += len(old)
-            except queue.Empty:
-                pass
-            self.output.put_nowait((item_id, bytes(pcm)))
-        with self.lock:
-            self.queued_bytes += len(pcm)
+        for offset in range(0, len(pcm), FRAME_BYTES):
+            part = bytes(pcm[offset:offset + FRAME_BYTES])
+            with self.lock:
+                if self.queued_bytes + len(part) > MAX_PLAYBACK_BYTES:
+                    # Don't trim audio mid-word: if Talk generates an
+                    # impossibly long response, reject the excess audio.
+                    self.discarded += len(part)
+                    continue
+                try:
+                    self.output.put_nowait((self.output_generation, item_id, part))
+                except queue.Full:
+                    self.discarded += len(part)
+                    continue
+                self.queued_bytes += len(part)
 
     def drain_playback(self):
         with self.lock:
             while True:
                 try:
-                    _item_id, pcm = self.output.get_nowait()
+                    _generation, _item_id, pcm = self.output.get_nowait()
                 except queue.Empty:
                     break
                 self.discarded += len(pcm)
@@ -195,6 +261,8 @@ class SocketAudio:
             result = (self.item_id, self.played_ms)
             self.item_id = None
             self.played_bytes = 0
+            self.output_generation += 1
+            self.output_level = 0.0
         if self.active.is_set():
             # Tell MSN to discard audio already queued after interruption.
             # Sending D is ordered with any in-flight O frames by write_lock.

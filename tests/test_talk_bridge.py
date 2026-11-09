@@ -45,6 +45,73 @@ class TalkBridgeTests(unittest.TestCase):
         finally:
             b.close()
 
+    def test_provider_audio_is_delivered_at_real_playback_speed(self):
+        a, b = socket.socketpair()
+        b.settimeout(2.0)
+        try:
+            audio = bridge.SocketAudio(a)
+            audio.start()
+            self.assertEqual(bridge.receive(b), (b"R", b""))
+            # A provider may send 600 ms of speech in one fast model delta.
+            # HermesXP must NOT flood the RTP queue with all 30 packets at
+            # once (the previous bug repeatedly dropped whole syllables).
+            speech = b"\x80\x10" * (480 * 30)
+            started = time.monotonic()
+            audio.queue_playback(speech, "response-1")
+            arrivals = []
+            received = bytearray()
+            for _ in range(30):
+                kind, data = bridge.receive(b)
+                self.assertEqual(kind, b"O")
+                arrivals.append(time.monotonic() - started)
+                received.extend(data)
+            self.assertEqual(received, speech)
+            self.assertLess(arrivals[3] - arrivals[0], 0.08)
+            self.assertGreater(arrivals[-1] - arrivals[0], 0.42)
+            self.assertLess(arrivals[-1] - arrivals[0], 0.75)
+            self.assertEqual(audio.discarded, 0)
+            self.assertFalse(audio.playback_pending)
+            audio.stop()
+        finally:
+            b.close()
+
+    def test_echo_gate_suppresses_speaker_and_keeps_clear_barge_in(self):
+        a, b = socket.socketpair()
+        b.settimeout(2.0)
+        try:
+            with patch.dict(os.environ, {"TALK_ECHO_GATE": "on"}):
+                audio = bridge.SocketAudio(a)
+            audio.start()
+            bridge.receive(b)  # ready
+            audio.queue_playback(b"\0\x18" * (480 * 12))
+            self.assertEqual(bridge.receive(b)[0], b"O")
+            self.assertGreater(audio.output_level, .1)
+            b.sendall(bridge.frame(b"I", b"\0\x04" * 480))
+            time.sleep(.025)
+            self.assertIsNone(audio.read_input_chunk())  # speaker leakage
+            speech = b"\0\x70" * 480
+            b.sendall(bridge.frame(b"I", speech))
+            actual = None
+            for _ in range(30):
+                actual = audio.read_input_chunk()
+                if actual:
+                    break
+                time.sleep(.01)
+            self.assertEqual(actual, speech)  # louder deliberate interruption
+            audio.drain_playback()
+            # A cancellation is sent to the RTP bridge to flush any
+            # packets already forwarded but not yet heard by Messenger.
+            seen_clear = False
+            for _ in range(16):
+                kind, _ = bridge.receive(b)
+                if kind == b"D":
+                    seen_clear = True
+                    break
+            self.assertTrue(seen_clear)
+            audio.stop()
+        finally:
+            b.close()
+
     def test_fail_closed_handshake(self):
         a, b = socket.socketpair()
         with patch.dict(os.environ, {"HERMES_MSN_BRIDGE_TOKEN": "a" * 40}):

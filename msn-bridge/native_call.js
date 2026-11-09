@@ -19,6 +19,9 @@ const {performance} = require('perf_hooks');
 
 const DEFAULT_PORT = 19740;
 const MAX_CALL_MS = 30 * 60 * 1000;
+// An unanswered outbound INVITE must not block Messenger's next Call click
+// for 30 minutes. The long lifetime applies only after a 200 OK is accepted.
+const OUTGOING_SETUP_TIMEOUT_MS = 20 * 1000;
 const TALK_BRIDGE_PORT = 18771;
 const TALK_MAX_FRAME = 256 * 1024;
 const TALK_MAX_PENDING = 256 * 1024;
@@ -292,13 +295,19 @@ class NativeCall {
       'l: ' + Buffer.byteLength(sdp),
       '', sdp,
     ].join('\r\n');
-      this.call = {
+    this.call = {
       id: callId, remote: null, type:12, seq:0,
       stamp:crypto.randomBytes(4).readUInt32BE(0),
       ssrc:crypto.randomBytes(4).readUInt32BE(0),
       initiated: true,
     };
-    this.call.expiry = setTimeout(()=>this.closeCall(),MAX_CALL_MS);
+    const pending = this.call;
+    pending.expiry = setTimeout(() => {
+      if (this.call === pending && !pending.remote) {
+        this.logger.warn('Native Messenger invitation timed out without an answer');
+        this.closeCall();
+      }
+    }, OUTGOING_SETUP_TIMEOUT_MS);
     try {
       this.sendSignal(12, encodeNativeSignal(callId, Buffer.from(sip)));
     }catch(e){this.closeCall();throw e;}
@@ -420,6 +429,11 @@ class NativeCall {
         }
         this.call.remote = remote;
         this.call.remoteTo = sip.headers.to;
+        if (this.call.expiry) clearTimeout(this.call.expiry);
+        const connectedCall = this.call;
+        this.call.expiry = setTimeout(() => {
+          if (this.call === connectedCall) this.hangup();
+        }, MAX_CALL_MS);
         this.logger.info('Windows Live Messenger accepted native SIP call; RTP peer port',remote.port);
         this.startTalk(this.call);
       }

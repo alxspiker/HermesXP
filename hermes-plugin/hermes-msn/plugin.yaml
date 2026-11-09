@@ -1,7 +1,7 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.7.4
+version: 0.7.5
 description: "Windows XP companion with native Messenger Call-button rendezvous, authenticated Hermes call controls, LAN recovery and MSN audio."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN

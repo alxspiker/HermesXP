@@ -67,7 +67,7 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.4)
+### Native Messenger calls (v0.7.5)
 
 **Native Call toolbar integration (v0.7.4).** When the paired owner presses
 the Call button in Windows Live Messenger, the MSN bridge receives WLM's
@@ -77,6 +77,8 @@ the same G.711 RTP/Hermes Talk session used by /nativecall. The delay is
 300 ms, not 650 ms; duplicate requests and post-hangup negotiation frames
 are suppressed to prevent a new call starting after the End Call button.
 Messenger's native End Call button is handled via the tunneled SIP BYE.
+Unanswered reciprocal invitations now expire after 20 seconds rather than
+blocking the next call attempt for the entire 30-minute maximum call duration.
 
 **Limit:** The legacy MSN service does not implement WLM 2009's original
 outgoing VOIP control plane (historically 0x80EE00C8). Therefore the Call

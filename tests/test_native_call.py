@@ -235,6 +235,31 @@ try{
 }finally{n.stop();global.setTimeout=oldTimeout;global.clearTimeout=oldClear;}
 """)
 
+    def test_unanswered_button_call_expires_without_blocking_future_calls(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {NativeCall}=require('./native_call.js');
+const sent=[],timers=[];
+const priorSet=global.setTimeout,priorClear=global.clearTimeout;
+global.setTimeout=(fn,ms)=>{const t={fn,ms,cleared:false};timers.push(t);return t;};
+global.clearTimeout=t=>{if(t)t.cleared=true;};
+const n=new NativeCall({client:{email:'bot@hermes.local',sendNativeSignal:(to,t,p)=>
+ sent.push({t,p})},owner:'owner@hermes.local',host:'192.168.1.81',
+ xpHost:'192.168.1.84',token:'a'.repeat(64),
+ logger:{info(){},warn(){},error(){}}});
+try {
+ assert.equal(n.invite(),true);
+ const expiry=timers.find(t=>t.ms===20000);
+ assert(expiry,'unanswered SIP invite must have a short setup timeout');
+ expiry.fn();
+ assert.equal(n.call,null,'stale outbound invite must release call state');
+ assert.equal(n.invite(),true,'a subsequent user or Hermes call can proceed');
+ assert.equal(n.hangup(),true);
+}finally {
+ n.stop();global.setTimeout=priorSet;global.clearTimeout=priorClear;
+}
+""")
+
     def test_pcmu_rtp_conversions(self):
         self.run_js(r"""
 const assert = require('assert');

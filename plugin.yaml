@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.5.1
-description: "HermesXP MSN messaging plus verified native WLM2009 incoming voice calls using MSNP18/SSO, tunneled SIP and RTP/PCMU. Original Call toolbar uses a reciprocal native-call fallback due to unsupported legacy VOIP service."
+version: 0.5.2
+description: "HermesXP MSN native WLM2009 voice calls with fast local-model conversation, speech-triggered RTP capture, full Hermes agent fallback for actions, and MSNP18/SSO SIP signaling."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process

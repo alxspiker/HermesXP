@@ -161,6 +161,41 @@ assert.equal(resamplePcm8To16(payload).length,640);
 assert.equal(parseRtp(Buffer.from('bad')),null);
 """)
 
+    def test_rtp_silence_never_triggers_transcription_but_speech_does(self):
+        self.run_js(r"""
+const assert = require('assert');
+const {NativeCall,encodeRtp,ulawEncode} = require('./native_call.js');
+const native = new NativeCall({
+  client:{},owner:'user@hermes.local',host:'192.168.1.81',
+  xpHost:'192.168.1.84',token:'x'.repeat(64),
+  logger:{info(){},warn(){},error(){}},
+});
+const call = {remote:{ip:'192.168.1.84',port:24100},busy:false};
+native.call=call;
+const captured=[];
+native.processTurn=async (_,pcm)=>{captured.push(pcm)};
+let seq=0;
+function send(value){
+  const audio=Buffer.alloc(160,ulawEncode(value));
+  const pkt=encodeRtp(audio,seq++,seq*160,1);
+  native.onRtp(pkt,{address:'192.168.1.84',port:24100});
+}
+for(let i=0;i<700;i++)send(0); // 14s silence: do not send to ASR
+assert.equal(captured.length,0);
+assert.equal(call.recording,undefined);
+assert(call.preRoll.length<=10);
+call.greetingPending=true;
+for(let i=0;i<50;i++)send(4000);
+assert.equal(captured.length,0);
+call.greetingPending=false;
+for(let i=0;i<12;i++)send(4000); // 240ms of real voice
+for(let i=0;i<32;i++)send(0);   // 640ms quiet -> complete
+assert.equal(captured.length,1);
+assert(captured[0].length>=16000);
+assert(captured[0].length<50000);
+native.stop();
+""")
+
 
 if __name__ == '__main__':
     unittest.main()

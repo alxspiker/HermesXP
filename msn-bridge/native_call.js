@@ -20,9 +20,10 @@ const DEFAULT_PORT = 19740;
 const MAX_CALL_MS = 30 * 60 * 1000;
 // 10s maximum at 16kHz PCM16, matching voice_gateway.MAX_INPUT exactly.
 const MAX_RECORD_BYTES = 16000 * 2 * 10;
-const SILENCE_MS = 700;
-const MIN_TALK_MS = 220;
-const MAX_TALK_MS = 9500;
+const SILENCE_MS = 560;
+const MIN_TALK_MS = 180;
+const MAX_TALK_MS = 9000;
+const PRE_ROLL_MS = 180;
 const AUDIO_WORKER_PORT = 18771;
 
 function parseSip(data) {
@@ -379,8 +380,17 @@ class NativeCall {
         // Start the media flow from Hermes. WLM 2009 may not transmit a
         // microphone RTP stream until the far end has begun sending audio.
         // This also exercises the real negotiated native audio port.
-        this.greet(this.call).catch(e =>
-          this.logger.warn('Native MSN greeting audio unavailable:', e.message));
+        const session = this.call;
+        session.greetingPending = true;
+        this.greet(session).catch(e =>
+          this.logger.warn('Native MSN greeting audio unavailable:', e.message))
+          .finally(() => {
+            if (this.call === session) {
+              session.greetingPending = false;
+              session.micQuietUntil = Date.now() + 350;
+              this.resetRecorder(session);
+            }
+          });
       }
       return;
     }
@@ -427,7 +437,8 @@ class NativeCall {
   onRtp(frame, info) {
     const call = this.call;
     if (!call || !call.remote || info.address !== call.remote.ip || info.port !== call.remote.port ||
-        call.busy || call.playing || (call.micQuietUntil && Date.now() < call.micQuietUntil))
+        call.busy || call.playing || call.greetingPending ||
+        (call.micQuietUntil && Date.now() < call.micQuietUntil))
       return;
     const payload = parseRtp(frame);
     if (!payload || payload.length > 1280) return;
@@ -436,32 +447,71 @@ class NativeCall {
       this.logger.info('First native Messenger PCMU RTP audio frame received');
     }
     let peak = 0;
+    let squared = 0;
     for (const sample of payload) {
       const a = Math.abs(ulawDecode(sample));
       if (a > peak) peak = a;
+      squared += a * a;
     }
+    const rms = Math.sqrt(squared / payload.length);
     const duration = payload.length / 8;
-    if (peak > 600) {
+    const voiced = rms >= Math.max(180, (call.noiseFloor || 30) * 2.7) && peak >= 460;
+    const pcmChunk = resamplePcm8To16(payload);
+    if (!call.recording) {
+      call.preRoll ||= [];
+      call.preRoll.push(pcmChunk);
+      while (call.preRoll.length * duration > PRE_ROLL_MS) call.preRoll.shift();
+      if (!voiced) {
+        // Learn only from non-speech packets. Silence is not passed to ASR,
+        // otherwise a ten-second silent call repeatedly hallucinated turns.
+        call.noiseFloor = 0.98 * (call.noiseFloor || rms) + 0.02 * rms;
+        return;
+      }
+      call.chunks = call.preRoll.splice(0);
+      call.bytes = call.chunks.reduce((total, part) => total + part.length, 0);
+      call.voicedMs = duration;
+      call.quietMs = 0;
+      call.recording = true;
+      call.recordedMs = call.chunks.length * duration;
+      return;
+    }
+    call.chunks.push(pcmChunk);
+    call.bytes += pcmChunk.length;
+    call.recordedMs = (call.recordedMs || 0) + duration;
+    if (voiced) {
       call.voicedMs += duration;
       call.quietMs = 0;
-    } else if (call.voicedMs >= MIN_TALK_MS) {
+    } else {
       call.quietMs += duration;
     }
-    if (call.bytes + payload.length * 4 <= MAX_RECORD_BYTES) {
-      call.chunks.push(resamplePcm8To16(payload));
-      call.bytes += payload.length * 4;
-    }
-    if ((call.voicedMs >= MIN_TALK_MS && call.quietMs >= SILENCE_MS) ||
-        (call.bytes >= MAX_RECORD_BYTES) || call.voicedMs > MAX_TALK_MS) {
+    const complete = (call.voicedMs >= MIN_TALK_MS && call.quietMs >= SILENCE_MS) ||
+      call.bytes >= MAX_RECORD_BYTES || call.recordedMs >= MAX_TALK_MS;
+    if (complete) {
+      if (call.voicedMs < MIN_TALK_MS) {
+        this.resetRecorder(call);
+        return;
+      }
       const pcm = Buffer.concat(call.chunks);
-      call.chunks = []; call.bytes = 0; call.voicedMs = 0; call.quietMs = 0;
+      const spokenMs = Math.round(call.voicedMs);
+      this.resetRecorder(call);
       call.busy = true;
+      this.logger.info('Native WLM voice detected (%d ms speech, %d ms captured)',
+        spokenMs, Math.round(pcm.length / 32));
       this.processTurn(call, pcm).catch(err => {
         this.logger.warn('Native voice turn failed:', err.message);
       }).finally(() => {
         if (this.call === call) call.busy = false;
       });
     }
+  }
+  resetRecorder(call) {
+    call.chunks = [];
+    call.preRoll = [];
+    call.bytes = 0;
+    call.voicedMs = 0;
+    call.quietMs = 0;
+    call.recordedMs = 0;
+    call.recording = false;
   }
   async greet(call) {
     if (!call || call.remote === null) return;

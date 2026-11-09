@@ -1,6 +1,6 @@
 # HermesXP / MSN Messenger Bridge — prototype
 
-### Native Windows Live Messenger calls (v0.5.1 — LAN preview)
+### Native Windows Live Messenger calls (v0.5.2 — LAN preview)
 
 This is a **native MSN voice-call path**. The original Windows Live Messenger
 2009 window owns the microphone, speakers, and call UI. HermesXP.exe's legacy
@@ -19,6 +19,26 @@ RTP audio and local speech/agent inference.
   reply, synthesizes it and transmits a native RTP response. The server-side
   end-to-end path was observed in service logs; someone at the XP machine
   must verify actual audibility.
+
+**Voice response fix (v0.5.2):** On the original hardware, the full Hermes
+agent took **105 seconds** to return a text reply; the Messenger call ended
+before the answer was spoken. Ordinary conversation now uses the **same local
+LFM3 Hermes model** with reasoning disabled, a short voice-only context,
+and brief output. An offline test of speech → ASR → reply → TTS took
+**11.8 seconds** on the home server. This fast path has no tools;
+requests to control XP or fetch live data still use the full Hermes agent
+and may take longer.
+
+Incoming RTP now uses speech-triggered recording with a short pre-roll,
+silence detection, and suppression of Hermes's greeting during playback.
+Silent calls no longer submit empty recordings to speech recognition.
+Wait until Hermes finishes speaking before replying (half-duplex).
+
+Optional private host settings: `HERMES_XP_VOICE_MODE=auto` (default),
+`agent` (full Hermes agent for all turns), or `fast` (local speech-only
+conversation, never tool execution); and
+`HERMES_XP_VOICE_FAST_MODEL=lfm3-hermes-64k:latest`
+to select another installed local Ollama model.
 
 **How to use it now:** open the Messenger chat with Hermes, send `/nativecall`
 (or `/call` when native mode is enabled), then click **Accept** inside

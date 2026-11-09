@@ -21,6 +21,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 from threading import Lock, Semaphore, Thread
@@ -38,11 +39,41 @@ RATE = 16000
 MAX_INPUT = RATE * 2 * 10  # ten seconds, PCM16 mono
 MAX_OUTPUT = RATE * 2 * 45
 TURN_TTL = 600
-SYSTEM_PROMPT = ("You are Hermes speaking to the owner over the HermesXP "
-                 "voice companion on Windows XP. Respond naturally and briefly.")
+SYSTEM_PROMPT = (
+    "You are Hermes speaking to the owner over a native Windows Live Messenger "
+    "voice call on Windows XP. Respond conversationally in one or two short "
+    "spoken sentences. Do not claim to have performed actions you did not perform."
+)
 AGENT_URL = "http://127.0.0.1:8642/v1/chat/completions"
+FAST_CHAT_URL = "http://127.0.0.1:11434/api/chat"
+FAST_CHAT_MODEL = os.environ.get("HERMES_XP_VOICE_FAST_MODEL", "lfm3-hermes-64k:latest")
 ASR_URL = "http://127.0.0.1:8899/v1/audio/transcriptions"
 TTS_URL = "http://127.0.0.1:8899/tts"
+
+# Native voice should not pay the cost of a full 10K-token Hermes tool prompt
+# just to respond to greetings. Requests involving real actions or fresh data
+# still run through the actual Hermes agent and its tools, not a tool-less LLM.
+_AGENT_INTENT = re.compile(
+    r"\b(?:open|close|launch|start|stop|run|execute|click|type|write|create|"
+    r"delete|remove|send|message|post|update|install|uninstall|restart|reboot|"
+    r"shutdown|search|look up|check|inspect|control|screenshot|read (?:a |the )?file|"
+    r"move|copy|rename|download|change|configure|fix|schedule|remind|set up)\b",
+    re.IGNORECASE,
+)
+_LIVE_INFORMATION = re.compile(
+    r"\b(?:weather|forecast|news|latest|current price|right now|today'?s news)\b",
+    re.IGNORECASE,
+)
+
+
+def needs_agent(transcript: str) -> bool:
+    """Route device actions and current lookups to Hermes; keep small talk fast."""
+    mode = os.environ.get("HERMES_XP_VOICE_MODE", "auto").lower().strip()
+    if mode == "agent":
+        return True
+    if mode == "fast":
+        return False
+    return bool(_AGENT_INTENT.search(transcript) or _LIVE_INFORMATION.search(transcript))
 
 
 def as_wave(pcm: bytes) -> bytes:
@@ -101,13 +132,42 @@ def ask_hermes(history: list[dict]) -> str:
            or os.environ.get("API_SERVER_KEY") or "").strip()
     headers = {"Authorization": "Bearer " + key} if key else {}
     headers["Content-Type"] = "application/json"
-    payload = json.dumps({"model": "lfm3-hermes", "messages": history, "stream": False}).encode()
+    payload = json.dumps({
+        "model": "lfm3-hermes", "messages": history, "stream": False,
+        "model_options": {"reasoning": {"enabled": False}},
+    }).encode()
     with urlopen(Request(AGENT_URL, payload, headers), timeout=230) as response:
         choices = json.loads(response.read(200_000))["choices"]
     content = choices[0]["message"]["content"]
     if not isinstance(content, str) or not content.strip():
         raise ValueError("Hermes returned an empty voice reply")
     return content.strip()[:1000]
+
+
+def ask_fast_voice(history: list[dict]) -> str:
+    """Low-latency local Hermes *model* for conversation (no tool execution).
+
+    Ollama's LFM3 model enables extended thinking by default. Explicitly
+    disabling thinking and limiting output is the important performance fix:
+    a simple greeting was 1.3s here vs ~105s through the full agent.
+    """
+    data = json.dumps({
+        "model": FAST_CHAT_MODEL,
+        "messages": history,
+        "stream": False,
+        "think": False,
+        "keep_alive": "10m",
+        "options": {"num_ctx": 3072, "num_predict": 96,
+                    "temperature": 0.3},
+    }).encode("utf-8")
+    request = Request(FAST_CHAT_URL, data, {"Content-Type": "application/json"})
+    with urlopen(request, timeout=35) as response:
+        result = json.loads(response.read(100_000))
+    message = result.get("message", {})
+    text = message.get("content", "") if isinstance(message, dict) else ""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Local Hermes voice model produced no answer")
+    return text.strip()[:450]
 
 
 def synthesize(text: str) -> bytes:
@@ -169,7 +229,18 @@ class VoiceState:
                 past = list(self.histories.get(owner, []))
             messages = [{"role": "system", "content": SYSTEM_PROMPT}] + past + [
                 {"role": "user", "content": transcript}]
-            reply = ask_hermes(messages)
+            use_agent = needs_agent(transcript)
+            log.info("Voice turn route: %s", "full Hermes agent" if use_agent else "fast local Hermes model")
+            if use_agent:
+                reply = ask_hermes(messages)
+            else:
+                try:
+                    reply = ask_fast_voice(messages)
+                except Exception:
+                    # Do not fall into a multi-minute full-agent run for
+                    # a greeting. Give a timely audible error instead.
+                    log.exception("Fast local Hermes model unavailable")
+                    reply = "I'm having trouble answering right now. Please try again."
             log.info("Hermes produced a voice response (%d characters)", len(reply))
             audio = synthesize(reply)
             if not audio or len(audio) > MAX_OUTPUT:

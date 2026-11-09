@@ -68,7 +68,7 @@ config_ready:
 
   WriteRegStr HKLM "Software\HermesXP" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayName" "HermesXP"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayVersion" "0.5.1"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayVersion" "0.5.2"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "Publisher" "WM Studios"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "UninstallString" '"$INSTDIR\Uninstall.exe"'

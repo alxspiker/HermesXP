@@ -51,6 +51,36 @@ class TestAudio(unittest.TestCase):
         binary = (ROOT / "dist" / "HermesXP.exe").read_bytes()
         self.assertIn(b"winmm.dll", binary)
 
+    def test_voice_routing_keeps_actions_in_the_real_agent(self):
+        with patch.dict(os.environ, {"HERMES_XP_VOICE_MODE": "auto"}):
+            self.assertFalse(v.needs_agent("Hello Hermes, can you hear me?"))
+            self.assertFalse(v.needs_agent("Tell me a joke"))
+            self.assertTrue(v.needs_agent("Open Notepad on my Windows XP computer"))
+            self.assertTrue(v.needs_agent("Restart the XP machine"))
+            self.assertTrue(v.needs_agent("What's today's weather?"))
+        with patch.dict(os.environ, {"HERMES_XP_VOICE_MODE": "agent"}):
+            self.assertTrue(v.needs_agent("Hello Hermes"))
+
+    def test_fast_local_model_disables_reasoning_and_tools(self):
+        import json
+        from unittest.mock import MagicMock
+        response = MagicMock()
+        response.read.return_value = b'{"message":{"content":"Hello from Hermes."}}'
+        response.__enter__.return_value = response
+        with patch.object(v, "urlopen", return_value=response) as http:
+            text = v.ask_fast_voice([
+                {"role": "system", "content": v.SYSTEM_PROMPT},
+                {"role": "user", "content": "Hello"},
+            ])
+        self.assertEqual(text, "Hello from Hermes.")
+        req = http.call_args[0][0]
+        body = json.loads(req.data)
+        self.assertEqual(req.full_url, v.FAST_CHAT_URL)
+        self.assertEqual(body["think"], False)
+        self.assertFalse(body["stream"])
+        self.assertLessEqual(body["options"]["num_predict"], 128)
+        self.assertNotIn("tools", body)
+
 
 class TestVoiceServer(unittest.TestCase):
     def setUp(self):
@@ -90,6 +120,7 @@ class TestVoiceServer(unittest.TestCase):
         audio = b"\0\0" * 1600
         with (patch.object(v, "transcribe", return_value="Hello Hermes") as asr,
               patch.object(v, "ask_hermes", return_value="Hello XP") as agent,
+              patch.object(v, "needs_agent", return_value=True),
               patch.object(v, "synthesize", return_value=audio) as tts):
             code, turn = self.request("POST", "/voice/turn", audio)
             self.assertEqual(code, 202)
@@ -106,6 +137,25 @@ class TestVoiceServer(unittest.TestCase):
             self.assertEqual(self.state.histories[self.state.identity(self.device)][-1]["content"], "Hello XP")
             # Non-authorized polling never reveals a turn's PCM or state.
             self.assertEqual(self.request("GET", "/voice/turn/" + turn.decode(), token="b"*64)[0], 403)
+
+    def test_fast_conversation_turn_resolves_and_records_history(self):
+        audio = b"\0\0" * 1600
+        with (patch.object(v, "transcribe", return_value="Hello there"),
+              patch.object(v, "needs_agent", return_value=False),
+              patch.object(v, "ask_fast_voice", return_value="Hi, I can hear you.") as fast,
+              patch.object(v, "ask_hermes", side_effect=AssertionError("full agent should not run")),
+              patch.object(v, "synthesize", return_value=audio)):
+            status, turn = self.request("POST", "/voice/turn", audio)
+            self.assertEqual(status, 202)
+            for _ in range(150):
+                status, result = self.request("GET", "/voice/turn/" + turn.decode())
+                if status != 202:
+                    break
+                time.sleep(.01)
+            self.assertEqual((status, result), (200, audio))
+            fast.assert_called_once()
+            history = self.state.histories[self.state.identity(self.device)]
+            self.assertEqual(history[-1]["content"], "Hi, I can hear you.")
 
     def test_busy_turn_does_not_queue_unbounded_agent_work(self):
         device = self.device

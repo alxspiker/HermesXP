@@ -273,6 +273,46 @@ assert(call.timerSlips>=4);
 native.stop();
 """)
 
+    def test_rtp_sender_uses_monotonic_deadlines_not_polling_timer(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {performance}=require('perf_hooks');
+const {NativeCall}=require('./native_call.js');
+const native=new NativeCall({
+ client:{},owner:'owner@example.invalid',host:'127.0.0.1',
+ xpHost:'127.0.0.2',token:'x'.repeat(64),
+ logger:{info(){},warn(){},error(){}}
+});
+native.sock.send=()=>{};
+const call={remote:{ip:'127.0.0.2',port:9000},output:Buffer.alloc(160*1000,0xff),
+ outSpeaking:true,seq:0,stamp:0,ssrc:2,packetAt:performance.now()+20};
+native.call=call;
+const oldSetTimeout=global.setTimeout;
+const oldClearTimeout=global.clearTimeout;
+const timers=[];
+global.setTimeout=(cb,delay)=>{timers.push({cb,delay});return timers.length;};
+global.clearTimeout=()=>{};
+try {
+ native.scheduleTalkAudio(call);
+ assert.equal(timers.length,1);
+ assert(timers[0].delay>10 && timers[0].delay<=21,
+  'timer should target the next 20ms packet deadline');
+ call.packetAt=performance.now()-1;
+ timers[0].cb();
+ assert.equal(timers.length,2);
+ assert(timers[1].delay>10 && timers[1].delay<=21,
+  'after a packet, schedule directly to its following deadline');
+ assert.equal(call.seq,1,'exactly one packet must be emitted');
+ native.closeCall();
+ timers[1].cb();
+ assert.equal(timers.length,2,'closed calls must not schedule more packets');
+} finally {
+ global.setTimeout=oldSetTimeout;
+ global.clearTimeout=oldClearTimeout;
+ native.stop();
+}
+""")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -222,7 +222,7 @@ class NativeCall {
     const old = this.call;
     this.call = null; // suppress reentrant callbacks from closing the socket
     if (old?.expiry) clearTimeout(old.expiry);
-    if (old?.audioTimer) clearInterval(old.audioTimer);
+    if (old?.audioTimer) clearTimeout(old.audioTimer);
     if (old?.statsTimer) clearInterval(old.statsTimer);
     if (old?.talk) {
       this.logCallStats(old, 'final');
@@ -234,10 +234,13 @@ class NativeCall {
   logCallStats(call, kind = 'periodic') {
     this.logger.info(
       'Messenger RTP %s: incoming=%d missing=%d talk_pcm=%dms played=%dms ' +
-      'underflows=%d clock_skips=%d queued=%dms peak_buffer=%dms interruptions=%d',
+      'underflows=%d clock_skips=%d spacing_lt15ms=%d spacing_gt25ms=%d ' +
+      'max_gap_ms=%d queued=%dms peak_buffer=%dms interruptions=%d',
       kind, call.incomingFrames || 0, call.incomingLost || 0,
       Math.round(call.outReceivedMs || 0), Math.round(call.outPlayedMs || 0),
       call.outputUnderflows || 0, call.timerSlips || 0,
+      call.shortPacketIntervals || 0, call.longPacketIntervals || 0,
+      Math.round(call.maxPacketGapMs || 0),
       Math.round((call.output?.length || 0) / 8),
       call.maxBufferedMs || 0, call.interruptions || 0);
   }
@@ -474,7 +477,11 @@ class NativeCall {
     call.output = Buffer.alloc(0);
     call.readyAt = 0;
     call.outSpeaking = false;
-    call.packetAt = performance.now();
+    call.packetAt = performance.now() + RTP_PACKET_MS;
+    call.lastPacketSentAt = null;
+    call.shortPacketIntervals = 0;
+    call.longPacketIntervals = 0;
+    call.maxPacketGapMs = 0;
     call.outputUnderflows = 0;
     call.timerSlips = 0;
     call.incomingLost = 0;
@@ -483,7 +490,7 @@ class NativeCall {
     call.outPlayedMs = 0;
     call.maxBufferedMs = 0;
     call.interruptions = 0;
-    call.audioTimer = setInterval(() => this.tickTalkAudio(call), 10);
+    this.scheduleTalkAudio(call);
     // WLM 2009 does not always deliver SIP BYE when its call window closes.
     // Periodic content-free stats remain available even if the call outlives
     // its GUI. No microphone PCM or transcript content is logged.
@@ -573,6 +580,22 @@ class NativeCall {
       } else {call.talk.destroy();return;}
     }
   }
+  scheduleTalkAudio(call) {
+    if (this.call !== call) return;
+    // The previous 10ms polling timer sometimes delivered two 20ms RTP
+    // packets less than 15ms apart even while clock_skips stayed zero. WLM's
+    // legacy jitter buffer can interpret these as bursty audio. Schedule
+    // directly against the next monotonic packet deadline instead of
+    // polling for it with a second, unrelated clock.
+    const delay = call.remote
+      ? Math.max(1, call.packetAt - performance.now())
+      : RTP_PACKET_MS;
+    call.audioTimer = setTimeout(() => {
+      if (this.call !== call) return;
+      this.tickTalkAudio(call);
+      this.scheduleTalkAudio(call);
+    }, delay);
+  }
   tickTalkAudio(call) {
     if (this.call !== call || !call.remote) return;
     const now = performance.now();
@@ -612,6 +635,13 @@ class NativeCall {
     const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);
     call.stamp = (call.stamp + RTP_SAMPLES_PER_PACKET) >>> 0;
     this.sock.send(packet, call.remote.port, call.remote.ip);
+    if (call.lastPacketSentAt != null) {
+      const gap = now - call.lastPacketSentAt;
+      if (gap < 15) call.shortPacketIntervals = (call.shortPacketIntervals || 0) + 1;
+      if (gap > 25) call.longPacketIntervals = (call.longPacketIntervals || 0) + 1;
+      call.maxPacketGapMs = Math.max(call.maxPacketGapMs || 0, gap);
+    }
+    call.lastPacketSentAt = now;
     call.packetAt += RTP_PACKET_MS;
   }
 }

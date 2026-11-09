@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.6)
+### Native Messenger calls (v0.6.7)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -156,6 +156,19 @@ The working foreground `hermes_execute` tool, the 800ms RTP buffer, echo
 timing preservation, and periodic content-free RTP diagnostics remain.
 The regression's low underflow count did not establish better perceived
 audio, and these changes are not treated as a permanent choppiness fix.
+
+**RTP sender clock correction (v0.6.7):** Replaced the 10ms polling
+`setInterval` with a one-shot `setTimeout` aimed directly at the next
+20ms monotonic RTP deadline. The old sender periodically emitted two
+20ms packets less than 15ms apart despite reporting zero skipped packets.
+On the Debian host, a 4.5-second synthetic stream measured 9 such short
+intervals with the old polling schedule, versus 0 with deadline scheduling.
+The changed sender additionally records the counts of intervals shorter
+than 15ms and longer than 25ms, and its longest observed packet gap, in
+the existing periodic `Messenger RTP` call statistics. The PCMU codec,
+800ms audio preroll, and Hermes Talk/provider/tool routing are unchanged.
+This does not establish whether XP's receiver jitter buffer eliminates
+every remaining audible dropout; compare live call quality and statistics.
 
 To diagnose:
 

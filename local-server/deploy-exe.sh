@@ -31,6 +31,21 @@ for cand in "$HOME/xp_cmd.py" /home/alxtheprogrammer/xp_cmd.py; do
 done
 [ -n "$XP_CMD" ] || { echo "[deploy-exe] xp_cmd.py not found (looked in \$HOME and /home/alxtheprogrammer)" >&2; exit 2; }
 
+# Use the registered installation location if setup has been run. New users
+# default to Program Files, while older installs use C:\HermesXP. Never
+# create an extra C:\HermesXP copy alongside a registered Program Files app.
+REGISTERED="$($XP_CMD 'reg query "HKLM\Software\HermesXP" /v InstallDir' 2>/dev/null || true)"
+INSTALL_DIR="$(printf '%s\n' "$REGISTERED" | sed -n -E 's/^[[:space:]]*InstallDir[[:space:]]+REG_SZ[[:space:]]+([A-Za-z]:\\.*)$/\1/p' | head -1 | tr -d '\r')"
+if [ -z "$INSTALL_DIR" ]; then
+    INSTALL_DIR='C:\HermesXP'
+fi
+case "$INSTALL_DIR" in
+    *'&'*|*'|'*|*'<'*|*'>'*|*'"'*|*'%'*|*'^'*|*'!'*)
+        echo "[deploy-exe] unsafe install directory returned by XP registry; refusing deployment" >&2
+        exit 2;;
+esac
+log "installation target: $INSTALL_DIR"
+
 # Stop a running copy first (tskill = XP Home; ignore failure if not running).
 $XP_CMD "tskill HermesXP" >/dev/null 2>&1 || true
 sleep 1
@@ -67,12 +82,12 @@ else
     warn "could not verify size on the XP (dir output: $(echo "$OUT" | tr '\n' ' ' | head -c 200))"
     exit 1
 fi
-# Also place the new exe in the package folder the user actually runs
-# (it has the DLL/INIs/CA beside it), so no manual re-extract is needed.
-$XP_CMD "copy /Y C:\\HermesXP.exe C:\\HermesXP\\HermesXP.exe" >/dev/null
-OUT2="$($XP_CMD "dir C:\\HermesXP\\HermesXP.exe" 2>/dev/null || true)"
+# The registered installation (or older legacy folder) is the ONLY permanent
+# executable location. Its adjacent .ini, DLL and CA files stay untouched.
+$XP_CMD "copy /Y C:\\HermesXP.exe \"$INSTALL_DIR\\HermesXP.exe\"" >/dev/null
+OUT2="$($XP_CMD "dir \"$INSTALL_DIR\\HermesXP.exe\"" 2>/dev/null || true)"
 if echo "$OUT2" | tr -d ',' | grep -q "$LOCAL_SIZE"; then
-    log "verified: C:\\HermesXP\\HermesXP.exe on $XP_HOST is $LOCAL_SIZE bytes"
+    log "verified: $INSTALL_DIR\\HermesXP.exe on $XP_HOST is $LOCAL_SIZE bytes"
 else
     warn "could not verify package-folder copy on the XP (dir output: $(echo "$OUT2" | tr '\n' ' ' | head -c 200))"
     exit 1

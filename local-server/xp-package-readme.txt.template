@@ -1,7 +1,13 @@
 HermesXP — MSN Messenger on Windows XP, talking to your Hermes agent
 =====================================================================
 
-This zip has everything needed to get Messenger working on an XP machine.
+For the normal Windows XP installation, use HermesXP-Setup.exe instead of
+this portable ZIP. The setup registers Start menu shortcuts and Add or Remove
+Programs, without replacing an existing hermesxp.ini. Once installed, launch
+HermesXP from the Start menu and click "Install for MSN" to configure Messenger.
+
+This ZIP is the portable/manual alternative and contains everything needed
+to get Messenger working on an XP machine.
 No internet on the XP is required: the server runs on the Hermes host
 (the machine at __LAN_IP__), and this zip came from it.
 

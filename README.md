@@ -1,4 +1,33 @@
-# Hermes XP / MSN Messenger Bridge — prototype v0.1
+# HermesXP / MSN Messenger Bridge — prototype
+
+## Installing HermesXP on Windows XP
+
+**Use `HermesXP-Setup.exe`, not a loose copy of `HermesXP.exe`.** The NSIS
+setup wizard supports XP SP3 x86, installs the companion and its MSN support
+files, creates Start menu and optional desktop shortcuts, and registers
+`HermesXP` under **Control Panel → Add or Remove Programs**.
+
+- On the Hermes host, run `bash local-server/build-xp-package.sh`. The
+  package directory `~/.hermes/msn-server/xp-package` contains
+  `HermesXP-Setup.exe` as well as a portable `HermesXP.zip` fallback.
+- Transfer the installer over a trusted LAN or USB. When the local package
+  server is enabled, the LAN address is
+  `http://<Hermes-host-LAN-IP>:18767/HermesXP-Setup.exe`.
+- Run setup as an XP administrator and choose the installation directory.
+  A fresh installation defaults to `Program Files\HermesXP`; an existing
+  `C:\HermesXP` installation is upgraded **in place** to retain its settings.
+  The installer never overwrites an existing `hermesxp.ini`.
+- Launch **Start → Programs → HermesXP → HermesXP**. The app has Wi-Fi
+  scanning/connection controls; **Install for MSN** is a separate button
+  inside the app that sets up Messenger and its local certificate.
+- Uninstall with **Add or Remove Programs**. This removes the companion and
+  its shortcuts; it deliberately preserves `hermesxp.ini` and other user
+  data. It does not undo the independent Messenger patch/CA installation.
+
+The installer must be built from a package containing the local CA, switcher,
+and host settings. Do **not** publish a host-specific installer on the public
+GitHub repository. `makensis` (from the free NSIS compiler package) is
+required on the build host, **not** on Windows XP.
 
 **Status: local server build in progress.** The XP probe (Step A) passed and the Hermes plugin (Step B) is installed. The local MSN server (Step C) is now built in: `local-server/install.sh` installs Escargot's open server code on the Hermes host, so **no Escargot website signup is needed** — WLM on the XP talks to a server running on the ZBook, and the Hermes bot logs in to the same server. The XP sign-in test (TLS 1.0 + local CA) is the remaining unverified step.
 
@@ -92,7 +121,7 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 
 3. **The installer prints the owner password ONCE** (`OWNER_PASSWORD_FOR_WLM=...`). Give it to the person who will type it into WLM on the XP. It is never written to a file.
 4. Restart the Hermes gateway so the `hermes_msn` platform connects (the adapter health-checks 127.0.0.1:1863 and logs a clear error if the server is down).
-5. On the XP: download the package zip from `http://<ZBook LAN IP>:18767/HermesXP.zip` (or copy it on a USB drive), unzip it to `C:\HermesXP`, run `HermesXP.exe` and click "Install for MSN". The Install button places `escargot.dll` and both Switcher INIs next to Messenger, installs the local CA into Trusted Root, patches both Messenger exes to load the Switcher at startup (originals backed up as `.bak`), and launches Messenger. No manual steps.
+5. On XP: run `HermesXP-Setup.exe` from the trusted LAN package directory (or transfer it over USB), then launch HermesXP from the Start menu and click **Install for MSN**. The button places `escargot.dll` and both Switcher INIs next to Messenger, installs the local CA into Trusted Root, patches both Messenger exes to load the Switcher at startup (originals backed up as `.bak`), and launches Messenger. The portable ZIP is available for troubleshooting.
    - Sign in to WLM as `user@hermes.local` (or your configured owner address) with the printed password. The bot (`hermes-bot@hermes.local`) is already in your contacts — pick it and send it a message. Only the configured owner address is allowed through the bridge into Hermes. The Hermes gateway itself must be running.
 6. Verify: `systemctl --user status msn-server.service msn-tls.service hermes-msn-bridge.service`, and check the gateway log shows the platform connected and the bridge logged in.
 
@@ -107,7 +136,7 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 - No remote code execution, auto-installation, service installation, file modification or Windows Registry edits in this prototype.
 - Nothing here bypasses XP security support end-of-life or fixes its browser/TLS stack.
 - XP executable is cross-compiled, PE32/Windows 5.01 verified, but not run/tested on a Windows XP installation.
-- To uninstall the prototype, delete `HermesXP.exe`, disable/remove the Hermes plugin, stop Node and remove its environment secrets. No XP OS settings are modified.
+- To uninstall the Windows companion, use Control Panel → Add or Remove Programs → HermesXP. This does not remove the separate Hermes host plugin/services or automatically undo existing Messenger modifications.
 
 ## Build and test
 

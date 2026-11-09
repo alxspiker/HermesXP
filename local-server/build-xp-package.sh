@@ -33,6 +33,7 @@ warn() { echo "[xp-package] WARNING: $*" >&2; }
 
 # Remove previously published secrets before any operation that can fail.
 rm -f -- "$PKG_DIR/HermesXP.zip"
+rm -f -- "$PKG_DIR/HermesXP-Setup.exe"
 rm -rf -- "$STAGE"
 
 # Server IP: override with LAN_IP env; otherwise auto-detect.
@@ -128,3 +129,12 @@ PYEOF
 SIZE="$(stat -c%s "$PKG_DIR/HermesXP.zip")"
 log "package ready: $PKG_DIR/HermesXP.zip ($SIZE bytes)"
 log "download: http://$LAN_IP:18767/HermesXP.zip (or copy it to a USB drive)"
+
+# Prefer a normal Windows XP installer with Add/Remove Programs integration.
+# The ZIP remains available for legacy/manual transfers.
+if command -v makensis >/dev/null 2>&1 && [ -f "$REPO_ROOT/xp-client/HermesXP-Setup.nsi" ]; then
+    bash "$SCRIPT_DIR/build-xp-installer.sh" "$REPO_ROOT"
+    log "installer: http://$LAN_IP:18767/HermesXP-Setup.exe"
+else
+    warn "NSIS not installed; portable ZIP generated but Setup.exe unavailable"
+fi

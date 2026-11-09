@@ -11,7 +11,6 @@ permissions:
 
 jobs:
   build-xp:
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -47,6 +46,7 @@ jobs:
           print("Release manifest:", manifest)
           PY
       - name: Publish only machine-independent binaries
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

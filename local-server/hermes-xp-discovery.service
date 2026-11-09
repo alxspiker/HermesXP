@@ -1,0 +1,17 @@
+[Unit]
+Description=Authenticated HermesXP LAN address discovery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_ROOT__
+Environment=PYTHONPATH=__REPO_ROOT__
+ExecStart=/usr/bin/python3 -m tools.lan_discovery
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

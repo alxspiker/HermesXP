@@ -93,6 +93,32 @@ class RemoteUiClientValidationTests(unittest.TestCase):
             thread.join(timeout=2)
             server.server_close()
 
+    def test_discovery_status_request_is_authenticated_and_read_only(self):
+        received = {}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received["path"] = self.path
+                received["token"] = self.headers.get("X-Hermes-Token")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"paired_host_ip=192.168.1.81 discovery_state=6 verified=3 win32_error=0")
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = HermesXPClient("127.0.0.1", "a" * 64, port=server.server_port)
+            self.assertIn("verified=3", client.network_status())
+            self.assertEqual(received, {"path": "/network/status", "token": "a" * 64})
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
     def test_general_service_validation_rejects_command_injection(self):
         self.assertEqual(validate_service_command("Spooler", "restart"),
                          b"action=restart&name=Spooler")

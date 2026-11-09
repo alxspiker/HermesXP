@@ -1,5 +1,40 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
+### Automatic address recovery (v0.7.1)
+
+Once paired, HermesXP automatically recovers from a Windows XP device
+switching Ethernet/Wi-Fi or changing its DHCP-assigned local IP, **and**
+from the Hermes host changing its private LAN IP. The XP companion sends
+an 8-second-interval UDP discovery challenge on port **18773**. The
+Hermes host verifies the packet using the existing per-device 256-bit
+pairing key, returns an HMAC-SHA256 authenticated challenge containing
+its current LAN IP, and accepts XP's new IP only after XP's signed ACK.
+The pairing secret is never broadcast, and anonymous discovery messages
+cannot update the device registry.
+
+On successful discovery, the XP companion updates its [Hermes] ServerIP
+and [Remote] AllowedHostIP configuration and, when the Hermes host address
+actually changed, updates the two managed MSN hosts-file entries and
+relaunches Messenger to reconnect to the new server. Existing unrelated
+hosts entries are preserved. The modern MSN bridge reselects its IP-bound
+RTP listener based on the paired device's active LAN subnet; the discovery
+host also updates its managed MSN redirect/TLS binding configuration when
+the server address changes. This avoids hardcoded per-user IPs. It does not
+require SSH, an internet API, VPN, fixed DHCP leases, or re-pairing.
+
+The Hermes server's LAN firewall must allow **UDP 18773 from RFC1918
+private networks**. The host updater will configure this scoped inbound
+rule automatically when UFW and noninteractive administrator authorization
+are available; otherwise it logs that the owner must authorize the LAN
+firewall rule. The XP side uses outbound UDP and authenticated replies.
+Neither the discovery protocol nor this port provides a remote shell.
+
+The authenticated XP endpoint GET /network/status reports discovery state,
+verified response count and a Winsock/CryptoAPI error code, without the
+pairing key. No new settings are necessary on users' installed XP systems.
+The host Python client also exposes
+HermesXPClient(device["host"], device["token"]).network_status().
+
 ### Generic Windows XP service management (v0.7.0)
 
 HermesXP now manages **any installed Windows service by its SCM service name**,
@@ -28,7 +63,7 @@ connected clients; Hermes must authorize the requested action.
 As with the existing remote UI, service management uses **plaintext HTTP on
 the trusted LAN**. Do not expose it to untrusted machines or the internet.
 
-### Native Messenger calls (v0.7.0)
+### Native Messenger calls (v0.7.1)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -50,7 +85,8 @@ Configure the native MSN connection in the PRIVATE
 ```ini
 MSN_BOT_PROTOCOL=18
 HERMES_MSN_NATIVE_CALL=1
-HERMES_MSN_NATIVE_IP=<private LAN IPv4 of Hermes host>
+# Optional: preferred local address (automatically ignored if no longer assigned)
+# HERMES_MSN_NATIVE_IP=<Hermes host's preferred private LAN IPv4>
 ```
 
 The bridge token and owner restriction are installed/preserved separately.

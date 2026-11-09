@@ -55,7 +55,11 @@ int main(void) {
     strcat(svc_request, token);
     strcat(svc_request, "\r\nContent-Length: 34\r\n\r\naction=restart&name=FreeSSHDService");
     assert(hermesxp_remote_authorized(svc_request, token));
-    svc_request[0]='G';
+    strcpy(svc_request, "GET /network/status HTTP/1.0\r\nX-Hermes-Token: ");
+    strcat(svc_request, token);
+    strcat(svc_request, "\r\n\r\n");
+    assert(hermesxp_remote_authorized(svc_request, token));
+    svc_request[0]='P';
     assert(!hermesxp_remote_authorized(svc_request, token));
     HERMESXP_SERVICE_COMMAND cmd;
     assert(hermesxp_service_parse("action=status&name=AudioSrv", strlen("action=status&name=AudioSrv"), &cmd));

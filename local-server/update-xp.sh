@@ -34,6 +34,8 @@ if [ "$REVISION" != "$CURRENT" ]; then
     # implementation. Update all atomically BEFORE the Node bridge restarts.
     cp "$REPO/msn-bridge/native_call.js" "$HERMES_HOME/msn-bridge/native_call.js.tmp"
     mv -f "$HERMES_HOME/msn-bridge/native_call.js.tmp" "$HERMES_HOME/msn-bridge/native_call.js"
+    cp "$REPO/msn-bridge/lan_address.js" "$HERMES_HOME/msn-bridge/lan_address.js.tmp"
+    mv -f "$HERMES_HOME/msn-bridge/lan_address.js.tmp" "$HERMES_HOME/msn-bridge/lan_address.js"
     cp "$REPO/msn-bridge/msnclient/frame.js" "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp"
     mv -f "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/frame.js"
     cp "$REPO/msn-bridge/msnclient/sso.js" "$HERMES_HOME/msn-bridge/msnclient/sso.js.tmp"
@@ -56,6 +58,18 @@ if [ "$REVISION" != "$CURRENT" ]; then
   systemctl --user daemon-reload
   systemctl --user enable --now hermes-xp-voice.service || echo "[update-xp] Talk bridge needs attention"
   systemctl --user try-restart hermes-xp-voice.service || true
+  # Authenticated LAN address discovery is a normal HermesXP service,
+  # not an RUITER-specific workaround. Runs independently of SSH and the
+  # MSN bot. A network change updates the paired registry and RTP address.
+  sed -e "s|__REPO_ROOT__|$REPO|g" \
+    "$REPO/local-server/hermes-xp-discovery.service" \
+    > "$HOME/.config/systemd/user/hermes-xp-discovery.service"
+  systemctl --user daemon-reload
+  systemctl --user enable --now hermes-xp-discovery.service || \
+    echo "[update-xp] LAN discovery service needs attention"
+  systemctl --user try-restart hermes-xp-discovery.service || true
+  bash "$REPO/local-server/enable-lan-discovery-firewall.sh" ||
+    echo "[update-xp] discovery ingress needs LAN firewall authorization"
   printf '%s\n' "$REVISION" > "$REV_FILE.tmp"
   mv -f "$REV_FILE.tmp" "$REV_FILE"
 fi

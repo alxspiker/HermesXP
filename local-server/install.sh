@@ -173,7 +173,13 @@ sed -e "s|__HOME__|$HOME|g" -e "s|__HERMES_BIN__|$HOME/.local/bin/hermes|g" "$SC
 sed -e "s|__REPO_ROOT__|$REPO_ROOT|g" "$SCRIPT_DIR/hermes-xp-update.service" > "$HOME/.config/systemd/user/hermes-xp-update.service"
 cp "$SCRIPT_DIR/hermes-xp-update.path" "$HOME/.config/systemd/user/hermes-xp-update.path"
 cp "$SCRIPT_DIR/hermes-xp-update.timer" "$HOME/.config/systemd/user/hermes-xp-update.timer"
+sed "s|__REPO_ROOT__|$REPO_ROOT|g" "$SCRIPT_DIR/hermes-xp-discovery.service" \
+    > "$HOME/.config/systemd/user/hermes-xp-discovery.service"
 systemctl --user daemon-reload
+systemctl --user enable --now hermes-xp-discovery.service ||
+    warn "HermesXP address discovery unavailable; check UDP 18773 LAN firewall"
+bash "$SCRIPT_DIR/enable-lan-discovery-firewall.sh" ||
+    warn "HermesXP discovery needs UDP 18773 enabled for the private LAN"
 systemctl --user enable --now hermes-xp-voice.service || warn "Hermes Talk bridge unavailable; see journalctl --user -u hermes-xp-voice"
 # Stop any old host before rebuilding: it may serve a legacy archive with secrets.
 # Refuse to proceed if it cannot be stopped.

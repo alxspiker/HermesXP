@@ -14,6 +14,8 @@ EXPORTS
  _bind@12=bind
  _listen@8=listen
  _accept@12=accept
+ _sendto@24=sendto
+ _recvfrom@24=recvfrom
  _ioctlsocket@12=ioctlsocket
  _select@20=select
  _getsockopt@20=getsockopt

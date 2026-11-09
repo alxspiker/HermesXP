@@ -113,6 +113,10 @@ class HermesXPClient:
         return self._request("POST", "/system/service",
                              validate_service_command(name, action)).decode("ascii", "replace")
 
+    def network_status(self) -> str:
+        """Read authenticated XP discovery status without exposing secrets."""
+        return self._request("GET", "/network/status").decode("ascii", "replace")
+
 
 def request(
     host: str, path: str, token: str, body: bytes = b"", *, port: int = 18768,
@@ -121,11 +125,11 @@ def request(
     """Make an authenticated local control call, returning type and raw response."""
     client = HermesXPClient(host=host, token=token, port=port, timeout=timeout)
     if path not in ("/ui/inspect", "/ui/click", "/ui/type", "/ui/key", "/screenshot.bmp",
-                    "/system/service"):
+                    "/system/service", "/network/status"):
         raise ValueError("Unsupported endpoint")
     if not isinstance(body, bytes):
         raise ValueError("Request body must be bytes")
-    method = "GET" if path in ("/ui/inspect", "/screenshot.bmp") else "POST"
+    method = "GET" if path in ("/ui/inspect", "/screenshot.bmp", "/network/status") else "POST"
     connection = http.client.HTTPConnection(client.host, client.port, timeout=client.timeout)
     try:
         connection.request(

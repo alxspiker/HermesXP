@@ -13,6 +13,7 @@ const fs = require('fs');
 const os = require('os');
 const MSNClient = require('./msnclient/main.js').MSNClient;
 const {NativeCall} = require('./native_call.js');
+const {interfaceForXP} = require('./lan_address.js');
 
 const email = process.env.MSN_BOT_EMAIL;
 const password = process.env.MSN_BOT_PASSWORD;
@@ -87,18 +88,20 @@ if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
     console.error('Native MSN calling requires MSN_BOT_PROTOCOL=13 or 18');
     process.exit(2);
   }
-  const host = process.env.HERMES_MSN_NATIVE_IP;
-  const device = (() => {
+  const registryPath = path.join(
+    process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'),
+    'hermesxp-devices.json');
+  const getDevice = () => {
     try {
-      const registry = JSON.parse(fs.readFileSync(path.join(
-        process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'),
-        'hermesxp-devices.json'), 'utf8'));
+      const registry = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
       return (registry.devices || []).find(d =>
         d && net.isIP(d.host) === 4 && /^[0-9a-f]{64}$/i.test(d.token || ''));
     } catch { return null; }
-  })();
+  };
+  const device = getDevice();
+  const host = device && interfaceForXP(device.host, process.env.HERMES_MSN_NATIVE_IP);
   if (!host || !device) {
-    console.error('Native MSN calling needs HERMES_MSN_NATIVE_IP and paired XP');
+    console.error('Native MSN calling needs paired XP on a reachable LAN interface');
     process.exit(2);
   }
   nativeCall = new NativeCall({
@@ -106,6 +109,23 @@ if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
   });
   nativeCall.start();
   client.on('native_signal', signal => nativeCall.onSignal(signal));
+  // Discovery updates the encrypted-token pairing registry after a signed
+  // challenge/response/ACK. The bridge checks both interfaces periodically,
+  // so an XP DHCP lease change or host NIC switch never requires editing
+  // static IP settings or manually restarting Node.
+  setInterval(() => {
+    const current = getDevice();
+    if (!current) return;
+    const currentHost = interfaceForXP(current.host, process.env.HERMES_MSN_NATIVE_IP);
+    if (!currentHost) return;
+    if (nativeCall.xpHost === current.host && nativeCall.host === currentHost) return;
+    console.info('HermesXP LAN route changed; reinitializing native SIP/RTP peer');
+    nativeCall.stop();
+    nativeCall = new NativeCall({
+      client, owner, host: currentHost, xpHost: current.host, token,
+    });
+    nativeCall.start();
+  }, 3000).unref();
 }
 let bridge, bridgeReady = false;
 let backlog = [];

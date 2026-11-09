@@ -1,0 +1,132 @@
+import copy
+import tempfile
+from pathlib import Path
+import unittest
+from unittest.mock import Mock, patch
+
+from tools.lan_discovery import Discovery, identity, reconcile_host_ip, sign
+
+
+TOKEN = "d" * 64
+
+
+class TestAuthenticatedLanDiscovery(unittest.TestCase):
+    def setUp(self):
+        self.device = {"name": "XP-Example", "host": "192.168.5.22",
+                       "token": TOKEN, "port": 18768}
+        self.saved = [self.device]
+        self.save = Mock(side_effect=self._save)
+        self.restart = Mock()
+        self.reconfigure = Mock(return_value=False)
+        self.discovery = Discovery(devices=lambda: copy.deepcopy(self.saved),
+                                   save=self.save,
+                                   resolve=lambda ip: "192.168.5.8",
+                                   restart=self.restart, reconfigure=self.reconfigure)
+        self.transport = Mock()
+        self.discovery.connection_made(self.transport)
+
+    def _save(self, new):
+        self.saved = copy.deepcopy(new)
+
+    def handshake(self, ip="192.168.5.92", host_ip="192.168.5.8"):
+        device_id = identity(TOKEN)
+        nonce = "1122334455667788"
+        request = f"HXP1 {device_id} {nonce}"
+        self.discovery.datagram_received(f"{request} {sign(TOKEN, request)}".encode(),
+                                         (ip, 30001))
+        sent, destination = self.transport.sendto.call_args.args
+        self.assertEqual(destination, (ip, 30001))
+        fields = sent.decode().split(" ")
+        self.assertEqual(fields[:2], ["HXP2", nonce])
+        self.assertEqual(fields[3], host_ip)
+        self.assertEqual(fields[4], sign(TOKEN, " ".join(fields[:4])))
+        ack = f"HXP3 {device_id} {nonce} {fields[2]}"
+        self.discovery.datagram_received(f"{ack} {sign(TOKEN, ack)}".encode(),
+                                         (ip, 30001))
+        return ack
+
+    def test_authenticated_xp_address_change_updates_registry(self):
+        self.handshake()
+        self.assertEqual(self.saved[0]["host"], "192.168.5.92")
+        self.save.assert_called_once()
+        self.restart.assert_called_once()
+        self.assertEqual(self.saved[0]["token"], TOKEN)
+
+    def test_same_address_never_restarts_bridge(self):
+        self.handshake("192.168.5.22")
+        self.save.assert_not_called()
+        self.restart.assert_not_called()
+
+    def test_invalid_mac_cannot_move_device(self):
+        request = f"HXP1 {identity(TOKEN)} 1122334455667788"
+        self.discovery.datagram_received(f"{request} {'0'*64}".encode(),
+                                         ("192.168.5.200", 30001))
+        self.transport.sendto.assert_not_called()
+        self.save.assert_not_called()
+        self.restart.assert_not_called()
+
+    def test_ack_requires_same_source_and_valid_mac(self):
+        device_id, nonce = identity(TOKEN), "1122334455667788"
+        request = f"HXP1 {device_id} {nonce}"
+        self.discovery.datagram_received(f"{request} {sign(TOKEN, request)}".encode(),
+                                         ("192.168.5.92", 30001))
+        challenge = self.transport.sendto.call_args.args[0].decode().split()
+        ack = f"HXP3 {device_id} {nonce} {challenge[2]}"
+        self.discovery.datagram_received(f"{ack} {sign(TOKEN, ack)}".encode(),
+                                         ("192.168.5.93", 30001))
+        self.save.assert_not_called()
+        self.discovery.datagram_received(f"{ack} {'0'*64}".encode(),
+                                         ("192.168.5.92", 30001))
+        self.save.assert_not_called()
+
+    def test_repeated_valid_hello_is_not_replayable_without_new_ack(self):
+        self.handshake()
+        self.save.reset_mock()
+        self.restart.reset_mock()
+        self.handshake()
+        self.save.assert_not_called()
+        self.restart.assert_not_called()
+
+    def test_public_sources_and_malformed_frames_rejected(self):
+        for source in ("8.8.8.8", "127.0.0.1", "169.254.5.3"):
+            self.discovery.datagram_received(b"HXP1 bad", (source, 30001))
+        self.discovery.datagram_received(b"HXP1 \0 noise", ("192.168.5.22", 30001))
+        self.discovery.datagram_received(b"x" * 500, ("192.168.5.22", 30001))
+        self.transport.sendto.assert_not_called()
+
+    def test_managed_host_address_rewrites_only_managed_config(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            server = home / ".hermes" / "msn-server"
+            server.mkdir(parents=True)
+            local = server / "settings_local.py"
+            local.write_text(
+                "TARGET_HOST = '192.168.1.81'\n"
+                "LOGIN_HOST = '192.168.1.81'\n"
+                "STORAGE_HOST = '192.168.1.81'\n"
+                "EXTRA_USER_SETTING='preserve-this'\n"
+            )
+            tls = server / "stunnel.conf"
+            tls.write_text("[msn]\naccept = 192.168.1.81:443\nconnect=127.0.0.1:8081\n")
+            with patch("tools.lan_discovery.subprocess.Popen") as restarted:
+                self.assertTrue(reconcile_host_ip("192.168.2.44", home=home))
+                self.assertFalse(reconcile_host_ip("192.168.2.44", home=home))
+                self.assertEqual(restarted.call_count, 2)
+            content = local.read_text()
+            self.assertIn("EXTRA_USER_SETTING='preserve-this'", content)
+            self.assertIn("TARGET_HOST = '192.168.2.44'", content)
+            self.assertIn("LOGIN_HOST = '192.168.2.44'", content)
+            self.assertIn("STORAGE_HOST = '192.168.2.44'", content)
+            self.assertIn("accept = 192.168.2.44:443", tls.read_text())
+
+    def test_host_ip_change_after_handshake_reconfigures_and_restarts(self):
+        self.handshake("192.168.5.22")
+        self.discovery.resolve = lambda ip: "192.168.5.9"
+        self.reconfigure.return_value = True
+        self.handshake("192.168.5.22", host_ip="192.168.5.9")
+        self.save.assert_not_called()
+        self.restart.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -43,6 +43,9 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define SO_REUSEADDR 0x0004
 #define SO_SNDTIMEO 0x1005
 #define SO_RCVTIMEO 0x1006
+#define SO_BROADCAST 0x0020
+#define SOCK_DGRAM 2
+#define IPPROTO_UDP 17
 #define INVALID_SOCKET ((unsigned int)~0u)
 
 typedef struct { long x,y; } POINT;
@@ -149,6 +152,8 @@ IMPORT int WINAPI listen(unsigned int,int);
 IMPORT unsigned int WINAPI accept(unsigned int,void *,int *);
 IMPORT int WINAPI send(unsigned int,const char *,int,int);
 IMPORT int WINAPI recv(unsigned int,char *,int,int);
+IMPORT int WINAPI sendto(unsigned int,const char *,int,int,const void *,int);
+IMPORT int WINAPI recvfrom(unsigned int,char *,int,int,void *,int *);
 IMPORT int WINAPI closesocket(unsigned int);
 IMPORT unsigned long WINAPI inet_addr(const char *);
 IMPORT unsigned short WINAPI htons(unsigned short);
@@ -696,6 +701,7 @@ static int rewrite_switcher_ini(const char *iniPath){
  int b=WritePrivateProfileStringA("options","configserver","msn.local",iniPath);
  return (a && b)?1:0;
 }
+#include "lan_discovery.h"
 static void do_install(HWND owner){
  char dir[512], ini[512], msnDir[512], src[512], dst[512], cmd[512], done[1200];
  char host[100], pwNote[200];
@@ -1130,6 +1136,20 @@ static DWORD WINAPI screenshot_server(void *param){
        send_all(cli,nf,strlen0(nf));
       } }
     }
+   } else if(request_is(req,"GET","/network/status")){
+    if(bodyLen!=0)send_http_text(cli,"400 Bad Request","status takes no body");
+    else {
+     char text[180];int pos=0;
+     pos=hxp_append(text,pos,sizeof(text),"paired_host_ip=");
+     pos=hxp_append(text,pos,sizeof(text),g_remote_allowed_ip);
+     pos=hxp_append(text,pos,sizeof(text)," discovery_state=");
+     append_number(text,&pos,hxp_discovery_status);
+     pos=hxp_append(text,pos,sizeof(text)," verified=");
+     append_number(text,&pos,hxp_discovery_verified);
+     pos=hxp_append(text,pos,sizeof(text)," win32_error=");
+     append_number(text,&pos,hxp_discovery_windows_error);
+     text[pos]=0;send_http_text(cli,"200 OK",text);
+    }
    } else if(do_remote_service(cli,req,bodyLen)){
     /* Completed through the authenticated, fixed-action service API. */
    } else if(!do_remote_ui(cli,req,bodyLen)){
@@ -1238,6 +1258,10 @@ void WINAPI WinMainCRTStartup(void){
  }
  /* Background authenticated screenshot and narrow UI-action listener. */
  CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
+ /* Independently recover IP changes on either machine by three-way
+    authenticated LAN discovery. This does not depend on SSH or Messenger. */
+ if(remote_token_is_valid(g_remote_token))
+  CreateThread(NULL,0,hxp_discovery_worker,NULL,0,&tid);
  ShowWindow(h,5);UpdateWindow(h);
  while(GetMessageA(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageA(&msg);}
  ExitProcess((UINT)msg.wParam);

@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.7.0
-description: "General-purpose Windows XP companion with paired remote UI, generic Windows service management, native MSN calls and Hermes tools."
+version: 0.7.1
+description: "Windows XP companion with authenticated automatic LAN address recovery, native MSN calls, Hermes tools and generic service management."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process

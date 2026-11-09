@@ -18,10 +18,11 @@ const net = require('net');
 
 const DEFAULT_PORT = 19740;
 const MAX_CALL_MS = 30 * 60 * 1000;
-const MAX_RECORD_BYTES = 8000 * 2 * 25;
+// 10s maximum at 16kHz PCM16, matching voice_gateway.MAX_INPUT exactly.
+const MAX_RECORD_BYTES = 16000 * 2 * 10;
 const SILENCE_MS = 700;
 const MIN_TALK_MS = 220;
-const MAX_TALK_MS = 24000;
+const MAX_TALK_MS = 9500;
 const AUDIO_WORKER_PORT = 18771;
 
 function parseSip(data) {
@@ -38,6 +39,10 @@ function parseSip(data) {
     const value = line.slice(colon + 1).trim();
     if (!headers[key]) headers[key] = value;
   }
+  const aliases = {v:'via',f:'from',t:'to',i:'call-id',l:'content-length',c:'content-type'};
+  for (const [alias, full] of Object.entries(aliases)) {
+    if (headers[alias] && !headers[full]) headers[full] = headers[alias];
+  }
   if (!headers['call-id'] || !headers.cseq || !headers.from || !headers.to ||
       !headers.via || headers['call-id'].length > 200) return null;
   const rawLength = headers['content-length'];
@@ -48,6 +53,34 @@ function parseSip(data) {
     body: data.subarray(split + 4, rawLength === undefined ?
                         undefined : split + 4 + Number(rawLength)).toString('utf8'),
   };
+}
+
+// WLM 2009 and aMSN carry SIP on MSNP UUN/UBN type 12 inside a compact
+// XML envelope, base64-encoding the entire SIP request/response. This is
+// NOT the raw SIP payload used by earlier diagnostic tests.
+function decodeNativeSignal(type, payload) {
+  if (type !== 12) return null;
+  if (!Buffer.isBuffer(payload) || payload.length > 16384) return null;
+  const xml = payload.toString('utf8').trim();
+  const match = /^<sip\s+([^<>]{1,300})><msg>([A-Za-z0-9+\/=\r\n]+)<\/msg><\/sip>$/.exec(xml);
+  if (!match || !/(?:^|\s)e="base64"(?:\s|$)/.test(match[1])) return null;
+  // WLM 2009 omits the optional fid="1" present in aMSN's envelope.
+  const callMatch = /(?:^|\s)i="([^"<>]{1,200})"(?:\s|$)/.exec(match[1]);
+  if (!callMatch || (/(?:^|\s)fid="/.test(match[1]) &&
+      !/(?:^|\s)fid="1"(?:\s|$)/.test(match[1]))) return null;
+  const encoded = match[2].replace(/\s+/g, '');
+  if (encoded.length > 16000 || encoded.length % 4) return null;
+  const sip = Buffer.from(encoded, 'base64');
+  if (!sip.length || sip.length > 12000 || sip.toString('base64') !== encoded)
+    return null;
+  return {callId: callMatch[1], sip};
+}
+function encodeNativeSignal(callId, sip) {
+  if (typeof callId !== 'string' || !/^[A-Za-z0-9{}@.\-_:]{1,200}$/.test(callId) ||
+      !Buffer.isBuffer(sip) || !sip.length || sip.length > 12000)
+    throw new Error('Invalid native SIP call envelope');
+  return Buffer.from('<sip e="base64" fid="1" i="' + callId + '"><msg>' +
+                     sip.toString('base64') + '</msg></sip>', 'utf8');
 }
 
 function parseSdp(sdp) {
@@ -186,34 +219,186 @@ class NativeCall {
   }
   closeCall() {
     if (this.call?.expiry) clearTimeout(this.call.expiry);
+    if (this.rendezvousTimer) clearTimeout(this.rendezvousTimer);
+    this.rendezvousTimer = null;
     this.call = null;
   }
   sendSignal(type, payload) {
     this.client.sendNativeSignal(this.owner, type, payload);
   }
+  invite() {
+    if (this.call) return false;
+    const callId = crypto.randomUUID();
+    const xp = this.xpHost;
+    const local = this.host;
+    const sdp = [
+      'v=0', 'o=HermesXP 0 0 IN IP4 ' + local, 's=HermesXP Voice',
+      'b=CT:99980', 't=0 0', 'm=audio ' + this.port + ' RTP/AVP 0',
+      'c=IN IP4 ' + local, 'a=rtpmap:0 PCMU/8000',
+      'a=encryption:rejected', '',
+    ].join('\r\n');
+    const sip = [
+      'INVITE sip:' + this.owner + ' SIP/2.0',
+      'v: SIP/2.0/TCP ' + local + ':19740',
+      'Max-Forwards: 70',
+      'f: <sip:' + this.client.email + '>;tag=hermesxp',
+      't: <sip:' + this.owner + '>',
+      'i: ' + callId,
+      'CSeq: 1 INVITE',
+      'm: <sip:' + this.client.email + '>;proxy=replace',
+      'Ms-Conversation-ID: f=1',
+      'User-Agent: HermesXP-Native/0.2',
+      'c: application/sdp',
+      'l: ' + Buffer.byteLength(sdp),
+      '', sdp,
+    ].join('\r\n');
+    this.call = {
+      id: callId, remote: null, type:12, seq:0,
+      stamp:crypto.randomBytes(4).readUInt32BE(0),
+      ssrc:crypto.randomBytes(4).readUInt32BE(0),
+      chunks:[], bytes:0, voicedMs:0, quietMs:0, busy:false,
+      initiated: true,
+    };
+    this.call.expiry = setTimeout(()=>this.closeCall(),MAX_CALL_MS);
+    try {
+      this.sendSignal(12, encodeNativeSignal(callId, Buffer.from(sip)));
+    }catch(e){this.closeCall();throw e;}
+    this.logger.info('Sent native MSN tunneled SIP invitation');
+    return true;
+  }
+  hangup() {
+    const call = this.call;
+    if (!call) return false;
+    if (call.remote || call.initiated) {
+      const bye = [
+        'BYE sip:' + this.owner + ' SIP/2.0',
+        'v: SIP/2.0/TCP ' + this.host + ':19740',
+        'Max-Forwards: 70',
+        'f: <sip:' + this.client.email + '>;tag=hermesxp',
+        't: ' + (call.remoteTo || '<sip:' + this.owner + '>'),
+        'i: ' + call.id,
+        'CSeq: 2 BYE',
+        'User-Agent: HermesXP-Native/0.2',
+        'l: 0', '', '',
+      ].join('\r\n');
+      try { this.sendSignal(12, encodeNativeSignal(call.id, Buffer.from(bye))); }
+      catch (error) { this.logger.warn('Native call hangup signaling failed:',error.message); }
+    }
+    this.closeCall();
+    return true;
+  }
   onSignal({sender, type, payload}) {
     if (sender !== this.owner) return;
-    const sip = parseSip(payload);
+    // Type 11 carries rendezvous negotiation metadata; it isn't SIP. WLM
+    // sends e.g. "1 3 7 <AppVersion> 0 3 0" before a real call.
+    if (type === 11) {
+      this.logger.info('Native MSN call rendezvous metadata received');
+      const notice = payload.toString('ascii');
+      const match = /^1 3 7 ([0-9]{6,10}) 0 3 0$/.exec(notice);
+      if (match && !this.call) {
+        // WLM requests peer media capability negotiation before its tunneled
+        // SIP INVITE. aMSN traces document its matching rendezvous reply
+        // shape ("2 3 5 <AppVersion> 0 3 0"). Keep it owner/IP restricted
+        // and bounded; this is not yet a proven WLM-originated call fix.
+        const now = Date.now();
+        if (!this.lastRendezvousAt || now - this.lastRendezvousAt > 2500) {
+          this.lastRendezvousAt = now;
+          this.sendSignal(11, Buffer.from('2 3 5 ' + match[1] + ' 0 3 0'));
+          this.logger.info('Replied to native WLM call rendezvous');
+          // Original WLM 2009 outgoing Call still depends on an unimplemented
+          // Escargot VOIP service and may show 0x80EE00C8. Offer a *native
+          // reciprocal SIP call* instead: its Accept prompt and microphone/
+          // speaker stream remain entirely inside Windows Live Messenger.
+          this.rendezvousTimer = setTimeout(() => {
+            this.rendezvousTimer = null;
+            if (!this.call) {
+              try { this.invite(); }
+              catch(error) {
+                this.logger.warn('WLM reciprocal native invitation failed:',error.message);
+              }
+            }
+          }, 650);
+        }
+      }
+      return;
+    }
+    const inner = decodeNativeSignal(type, payload);
+    const sip = inner && parseSip(inner.sip);
     if (!sip) {
+      if (process.env.MSN_NATIVE_TRACE === '1') {
+        // Explicitly opt-in local-only diagnostic. Hex is bounded and may
+        // contain call metadata; never enable in normal service operation.
+        this.logger.warn('Native MSN signal sample:', type,
+                         payload.subarray(0, 128).toString('hex'));
+      }
       this.logger.warn('Native MSN signaling envelope not recognized (type, bytes):',
                        type, payload.length);
       return;
     }
+    if (sip.headers['call-id'] !== inner.callId) return;
+    const answer = (code, reason, sdp = '') =>
+      this.sendSignal(type, encodeNativeSignal(inner.callId, sipResponse(sip, code, reason, sdp)));
     const verb = sip.start.split(' ')[0];
+    if (verb === 'SIP/2.0' && this.call &&
+        this.call.id === inner.callId && this.call.initiated) {
+      const code = Number(sip.start.split(' ')[1]);
+      if (code >= 200 && sip.headers.cseq.toUpperCase().includes('INVITE')) {
+        // SIP INVITE completes only after ACK. WLM will not start the RTP
+        // media leg when it never sees the ACK to its 200 OK.
+        const ack = [
+          'ACK sip:' + this.owner + ' SIP/2.0',
+          'v: SIP/2.0/TCP ' + this.host + ':19740',
+          'Max-Forwards: 70',
+          'f: <sip:' + this.client.email + '>;tag=hermesxp',
+          't: ' + sip.headers.to,
+          'i: ' + inner.callId,
+          'CSeq: 1 ACK',
+          'User-Agent: HermesXP-Native/0.2',
+          'l: 0', '', '',
+        ].join('\r\n');
+        this.sendSignal(12, encodeNativeSignal(inner.callId, Buffer.from(ack)));
+      }
+      if (code >= 300) {
+        this.logger.warn('Messenger declined SIP call:', code);
+        this.closeCall();
+        return;
+      }
+      if (code === 200) {
+        if (process.env.MSN_NATIVE_TRACE === '1') {
+          const diagnostic = sip.body.split(/\r?\n/).filter(x =>
+            /^(m=audio|c=IN IP4|a=ice-|a=candidate|a=rtpmap)/.test(x)).slice(0,15);
+          this.logger.info('WLM native SDP media descriptors:', diagnostic.join(' | ').slice(0,1200));
+        }
+        const remote = parseSdp(sip.body);
+        if (!remote || remote.ip !== this.xpHost) {
+          this.closeCall();return;
+        }
+        this.call.remote = remote;
+        this.call.remoteTo = sip.headers.to;
+        this.logger.info('Windows Live Messenger accepted native SIP call; RTP peer port',remote.port);
+        // Start the media flow from Hermes. WLM 2009 may not transmit a
+        // microphone RTP stream until the far end has begun sending audio.
+        // This also exercises the real negotiated native audio port.
+        this.greet(this.call).catch(e =>
+          this.logger.warn('Native MSN greeting audio unavailable:', e.message));
+      }
+      return;
+    }
     if (verb === 'INVITE') {
       if (this.call) {
-        this.sendSignal(type, sipResponse(sip, 486, 'Busy Here'));
+        answer(486, 'Busy Here');
         return;
       }
       const offer = parseSdp(sip.body);
       // This project is LAN-only. Reject a different or public RTP address
       // rather than sending audio to an untrusted network endpoint.
       if (!offer || offer.ip !== this.xpHost) {
-        this.sendSignal(type, sipResponse(sip, 488, 'Not Acceptable Here'));
+        answer(488, 'Not Acceptable Here');
         return;
       }
       const session = {
         id: sip.headers['call-id'], remote: offer, type, seq: 0,
+        remoteTo: sip.headers.from,
         stamp: crypto.randomBytes(4).readUInt32BE(0),
         ssrc: crypto.randomBytes(4).readUInt32BE(0),
         chunks: [], bytes: 0, voicedMs: 0, quietMs: 0, busy: false,
@@ -226,13 +411,13 @@ class NativeCall {
       ].join('\r\n');
       this.call = session;
       session.expiry = setTimeout(() => this.closeCall(), MAX_CALL_MS);
-      this.sendSignal(type, sipResponse(sip, 200, 'OK', offerAnswer));
+      answer(200, 'OK', offerAnswer);
       this.logger.info('Hermes accepted native MSN SIP audio invitation');
       return;
     }
     if ((verb === 'BYE' || verb === 'CANCEL') && this.call &&
         sip.headers['call-id'] === this.call.id) {
-      this.sendSignal(type, sipResponse(sip, 200, 'OK'));
+      answer(200, 'OK');
       this.closeCall();
       this.logger.info('Hermes native MSN call ended');
       return;
@@ -241,10 +426,15 @@ class NativeCall {
   }
   onRtp(frame, info) {
     const call = this.call;
-    if (!call || info.address !== call.remote.ip || info.port !== call.remote.port ||
-        call.busy) return;
+    if (!call || !call.remote || info.address !== call.remote.ip || info.port !== call.remote.port ||
+        call.busy || call.playing || (call.micQuietUntil && Date.now() < call.micQuietUntil))
+      return;
     const payload = parseRtp(frame);
     if (!payload || payload.length > 1280) return;
+    if (!call.rtpSeen) {
+      call.rtpSeen = true;
+      this.logger.info('First native Messenger PCMU RTP audio frame received');
+    }
     let peak = 0;
     for (const sample of payload) {
       const a = Math.abs(ulawDecode(sample));
@@ -273,6 +463,13 @@ class NativeCall {
       });
     }
   }
+  async greet(call) {
+    if (!call || call.remote === null) return;
+    const greeting = await requestWorker(this.token, 'GET', '/voice/greeting');
+    if (greeting.code !== 200) throw new Error('local TTS greeting failed');
+    if (this.call !== call) return;
+    await this.playPcm16(call, greeting.body);
+  }
   async processTurn(call, pcm) {
     const started = await requestWorker(this.token, 'POST', '/voice/turn', pcm);
     if (started.code !== 202) throw new Error('speech worker rejected native turn');
@@ -288,18 +485,26 @@ class NativeCall {
     if (!response || response.code !== 200 || this.call !== call)
       throw new Error('native voice worker did not return audio');
     await this.playPcm16(call, response.body);
+    if (this.call === call)
+      this.logger.info('Hermes voice response sent via native Messenger RTP');
   }
   async playPcm16(call, pcm) {
     // Speech worker outputs 16kHz PCM16; 2:1 downsample to 8kHz for PCMU.
-    for (let offset = 0; offset + 640 <= pcm.length; offset += 640) {
-      if (this.call !== call) return;
-      const chunk = Buffer.alloc(160);
-      for (let i = 0; i < 160; i++)
-        chunk[i] = ulawEncode(pcm.readInt16LE(offset + i * 4));
-      const rtp = encodeRtp(chunk, call.seq++, call.stamp, call.ssrc);
-      call.stamp = (call.stamp + 160) >>> 0;
-      this.sock.send(rtp, call.remote.port, call.remote.ip);
-      await new Promise(resolve => setTimeout(resolve, 20));
+    call.playing = true;
+    try {
+      for (let offset = 0; offset + 640 <= pcm.length; offset += 640) {
+        if (this.call !== call) return;
+        const chunk = Buffer.alloc(160);
+        for (let i = 0; i < 160; i++)
+          chunk[i] = ulawEncode(pcm.readInt16LE(offset + i * 4));
+        const rtp = encodeRtp(chunk, call.seq++, call.stamp, call.ssrc);
+        call.stamp = (call.stamp + 160) >>> 0;
+        this.sock.send(rtp, call.remote.port, call.remote.ip);
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    } finally {
+      call.micQuietUntil = Date.now() + 850;
+      call.playing = false;
     }
   }
 }
@@ -307,4 +512,5 @@ class NativeCall {
 module.exports = {
   NativeCall, parseSip, parseSdp, sipResponse, parseRtp, encodeRtp,
   ulawEncode, ulawDecode, resamplePcm8To16, requestWorker,
+  encodeNativeSignal, decodeNativeSignal,
 };

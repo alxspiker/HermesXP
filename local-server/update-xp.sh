@@ -36,6 +36,8 @@ if [ "$REVISION" != "$CURRENT" ]; then
     mv -f "$HERMES_HOME/msn-bridge/native_call.js.tmp" "$HERMES_HOME/msn-bridge/native_call.js"
     cp "$REPO/msn-bridge/msnclient/frame.js" "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp"
     mv -f "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/frame.js"
+    cp "$REPO/msn-bridge/msnclient/sso.js" "$HERMES_HOME/msn-bridge/msnclient/sso.js.tmp"
+    mv -f "$HERMES_HOME/msn-bridge/msnclient/sso.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/sso.js"
     cp "$REPO/msn-bridge/msnclient/main.js" "$HERMES_HOME/msn-bridge/msnclient/main.js.tmp"
     mv -f "$HERMES_HOME/msn-bridge/msnclient/main.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/main.js"
     echo "[update-xp] updated local MSN bridge code"

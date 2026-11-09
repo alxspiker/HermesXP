@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.5.0
-description: "HermesXP MSN messaging and opt-in native call experiment: MSNP13 peer signaling, SIP/SDP and RTP/PCMU with local Hermes audio/agent processing, plus the legacy XP voice companion."
+version: 0.5.1
+description: "HermesXP MSN messaging plus verified native WLM2009 incoming voice calls using MSNP18/SSO, tunneled SIP and RTP/PCMU. Original Call toolbar uses a reciprocal native-call fallback due to unsupported legacy VOIP service."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process
@@ -12,10 +12,10 @@ requires_env:
     password: false
 optional_env:
   - name: HERMES_MSN_NATIVE_CALL
-    description: Opt-in experimental native Messenger SIP/RTP handler (requires MSN_BOT_PROTOCOL=13)
+    description: Opt-in native Messenger SIP/RTP handler (requires MSN_BOT_PROTOCOL=18 for WLM2009)
     password: false
   - name: MSN_BOT_PROTOCOL
-    description: Set to 13 for UUN/UBN peer signaling; default 9 for stable text chat
+    description: Set to 18 for WLM2009 MSNP18/SSO voice, or 13 for limited peer signaling; default 9 for stable text chat
     password: false
   - name: HERMES_MSN_NATIVE_IP
     description: Private LAN IPv4 address to advertise in SIP/SDP and bind RTP/UDP on the Hermes host

@@ -1,60 +1,80 @@
 # HermesXP / MSN Messenger Bridge — prototype
 
-### Native Windows Live Messenger Computer Call experiment (v0.5.0)
+### Native Windows Live Messenger calls (v0.5.1 — LAN preview)
 
-The repository now includes a genuine **MSNP13 / SIP / SDP / RTP** voice
-endpoint on the Hermes computer. Windows Live Messenger's existing audio
-interface is the intended microphone/speaker frontend; the XP companion's
-separate Talk button is **not** involved in this path.
+This is a **native MSN voice-call path**. The original Windows Live Messenger
+2009 window owns the microphone, speakers, and call UI. HermesXP.exe's legacy
+five-second voice button is not involved. The Hermes host handles signaling,
+RTP audio and local speech/agent inference.
 
-The native endpoint is opt-in while interoperability with WLM 2009 is tested.
-In the host's private `~/.hermes/msn-bridge.env` (not in GitHub), set:
+**Verified on RUITER (Windows XP SP3), November 9, 2026:**
+
+- The Hermes bot signs in over **MSNP18 with RST2/SSO** and receives/sends
+  binary `UUN`/`UBN` messages.
+- Sending `/nativecall` in the bot conversation makes **Messenger itself**
+  display a native incoming-call Accept/Decline prompt.
+- Clicking **Accept** completes SIP/SDP negotiation and confirms
+  `PCMU/8000` RTP ports. Hermes sends synthesized greeting RTP, receives
+  microphone RTP, transcribes a turn using local LFM3-Audio, gets an agent
+  reply, synthesizes it and transmits a native RTP response. The server-side
+  end-to-end path was observed in service logs; someone at the XP machine
+  must verify actual audibility.
+
+**How to use it now:** open the Messenger chat with Hermes, send `/nativecall`
+(or `/call` when native mode is enabled), then click **Accept** inside
+Messenger. `/hangup` or Messenger's **End call** ends the native call.
+
+**The original Call toolbar has one remaining legacy limitation.** WLM 2009
+still displays `0x80EE00C8` because the open MSN server does not implement
+Microsoft's old *outgoing* VOIP service. Hermes now recognizes the
+corresponding `UUN` type-11 rendezvous and sends a **reciprocal native SIP
+call** back to Messenger. You can accept that call in Messenger, but the
+original error message appears first. This workaround does *not* claim to
+implement the missing original outgoing-call service. For a cleaner flow,
+use `/nativecall`.
+
+For another Hermes installation, enable this explicitly in the host's
+**private** `~/.hermes/msn-bridge.env`:
 
 ```ini
-MSN_BOT_PROTOCOL=13
+MSN_BOT_PROTOCOL=18
 HERMES_MSN_NATIVE_CALL=1
-HERMES_MSN_NATIVE_IP=<Hermes host private LAN IPv4>
+HERMES_MSN_NATIVE_IP=<Hermes host's private LAN IPv4>
 ```
 
 Restart `hermes-msn-bridge.service` and `hermes-xp-voice.service`.
-The MSN bot then advertises SIP-call capabilities and accepts **incoming
-plain SIP/SDP invitations tunneled via UUN/UBN**, negotiating PCMU/8000
-(G.711 μ-law) RTP over a LAN-only UDP port 19740. The RTP stream is handled
-by the native Node bridge, while the voice worker on loopback 18771 uses the
-local LFM3-Audio speech recognition and TTS plus Hermes's agent route.
-Only the configured MSN owner and paired XP IP can originate the call.
-Neither the native-media process nor XP obtains the Hermes agent key.
+This mode advertises WLM-compatible voice capabilities, decodes the
+`<sip e="base64" i="..."><msg>...</msg></sip>` tunneled SIP envelope, sends
+SIP INVITE/ACK/BYE over `UUN`/`UBN` type 12, and uses **G.711 PCMU RTP
+on UDP/19740**. The native Node bridge sends PCM turns to a separate
+**loopback-only** audio worker on TCP/18771. That worker reuses the
+Hermes Talk local LFM3 transcription/TTS endpoints and the local Hermes
+agent route; Node and XP never receive the agent's API key.
 
-**Compatibility caveat:** WLM 2009 implements multiple proprietary call
-envelopes and SIP tunnel versions. Its **actual Call button → our bot**
-exchange is not verified yet; UUN/UBN *plain SIP* and PCMU are implemented,
-not every proprietary signaling format. A live test may show a different
-envelope, which requires interpreting its real bytes rather than guessing.
-The interface remains the original Messenger interface, even if the call
-cannot negotiate yet.
+Calls accept only the configured MSN owner, use the paired XP's private
+IPv4 address for RTP, and run on trusted LAN only. Restrict UDP/19740 to
+the XP device. No port forwarding or automatic firewall changes are made.
+There is at most one call, with speech turns buffered for processing;
+this is **not yet a full low-latency, full-duplex, barge-in-capable system**.
+Audio playback deliberately suppresses microphone echo and only processes
+bounded recordings. This is still experimental.
 
-If calls fail, unset `HERMES_MSN_NATIVE_CALL` and
-`MSN_BOT_PROTOCOL`, then restart the bot service. The default MSNP9 text
-channel remains available. This feature does not enable port forwarding,
-firewall changes, or public call access; expose UDP/19740 only between the
-paired XP and Hermes host on a trusted LAN. Native voice is experimental,
-with up to one active call and asynchronous speech turns (not low-latency
-continuous streaming yet).
+To return to proven MSNP9 text messaging, remove `HERMES_MSN_NATIVE_CALL`
+and `MSN_BOT_PROTOCOL` from the private bridge environment and restart
+`hermes-msn-bridge.service`. Do not leave `MSN_DEBUG` or
+`MSN_NATIVE_TRACE` enabled during normal use.
 
-### Voice companion preview (v0.4.0)
+### Legacy separate voice companion (v0.4.0; optional)
 
-The XP executable now has **Talk to Hermes (5s)**, a push-to-talk-style
+The XP executable also retains **Talk to Hermes (5s)**, a push-to-talk-style
 microphone/speaker path to the local Hermes host. From your MSN chat with the
 Hermes bot, send **`/call`** to display an incoming voice invitation in
 HermesXP. Accept on XP before the microphone is activated. Send **`/hangup`**
 to stop playback/polling, or press the Stop voice button.
 
-**This is not yet a native Windows Live Messenger Computer Call.** WLM's
-original **Call** toolbar initiates its own SIP/P2P/RTP negotiation. Neither
-the lightweight MSN bot in this repository nor the pinned local MSN server
-provides the necessary call negotiation/media relay today. `/call` is an
-MSN text command which asks a *separate HermesXP companion* to open a voice
-session. It does not ring inside WLM's native voice-call UI.
+This old component is **not** the native Messenger call path above. With
+native mode enabled, `/call` and `/hangup` control the native call instead.
+Without native mode, they retain their previous companion behavior.
 
 How the prototype works:
 

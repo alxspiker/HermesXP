@@ -4,6 +4,9 @@
 const WITH_PAYLOAD = new Set([
   'UUX', 'MSG', 'QRY', 'NOT', 'GCF', 'ADL', 'FQY', 'RML',
   'UUN', 'UUM', 'PUT', 'DEL', 'SDG', 'VAS', 'SDC', 'UBN',
+  // MSNP16/18 sends XML presence in UBX; without honoring its length, XML
+  // gets merged into the *next RNG* and text messaging silently breaks.
+  'UBX', 'IPG', 'UBM', 'NFY',
 ]);
 
 class MSNPFrameDecoder {

@@ -31,12 +31,38 @@ assert.deepEqual(messages[0].body, body);
 assert.equal(messages[1].command, 'UUN');
 assert.equal(d.pending.length, 0);
 assert.throws(() => d.feed(Buffer.from('UBN user 1 999999\r\n')));
+const presence = Buffer.from('<Data><PSM>hello</PSM></Data>');
+const ubx = Buffer.concat([Buffer.from('UBX 1:peer@example.test ' +
+  presence.length + '\r\n'), presence,
+  Buffer.from('RNG 42 127.0.0.1:1864 CKI 123 peer@example.test\r\n')]);
+const parsed = new MSNPFrameDecoder().feed(ubx);
+assert.equal(parsed.length,2);
+assert.deepEqual(parsed[0].body,presence);
+assert.equal(parsed[1].command,'RNG');
+""")
+
+    def test_msnp18_sso_rps_key_derivation(self):
+        self.run_js(r"""
+const assert = require('assert');
+const {rpsKey,signChallenge} = require('./msnclient/sso.js');
+const key=Buffer.alloc(24,1);
+const result=rpsKey(key,Buffer.from('WS-SecureConversationSESSION KEY HASH'));
+assert.equal(result.toString('hex'),'454c4f56ed426848d668efe858daf483520696b91a5888a3');
+const proof=signChallenge(key.toString('base64'),Buffer.alloc(48,3).toString('base64'));
+const binary=Buffer.from(proof,'base64');
+assert.equal(binary.readUInt32LE(0),28);
+assert.equal(binary.readUInt32LE(12),0x8004);
+assert.equal(binary.readUInt32LE(16),8);
+assert.equal(binary.readUInt32LE(20),20);
+assert.equal(binary.length,28+8+20+binary.readUInt32LE(24));
 """)
 
     def test_sip_sdp_offer_accept_and_reject(self):
         self.run_js(r"""
 const assert = require('assert');
-const {parseSip, parseSdp, sipResponse, NativeCall} = require('./native_call.js');
+const {
+  parseSip, parseSdp, sipResponse, NativeCall, encodeNativeSignal, decodeNativeSignal
+} = require('./native_call.js');
 const offer = 'v=0\r\no=user 0 0 IN IP4 192.168.1.84\r\ns=-\r\nc=IN IP4 192.168.1.84\r\nt=0 0\r\nm=audio 30000 RTP/AVP 112 0 8\r\na=rtpmap:0 PCMU/8000\r\n';
 const message = Buffer.from([
   'INVITE sip:bot@hermes.local SIP/2.0',
@@ -58,20 +84,62 @@ assert(response.startsWith('SIP/2.0 200 OK\r\n'));
 assert(response.includes('Call-ID: call-a'));
 assert(response.includes('To: <sip:bot@hermes.local>;tag=hermesxp'));
 assert.equal(parseSip(Buffer.from('junk')), null);
+const compact = Buffer.from([
+  'INVITE sip:bot@hermes.local SIP/2.0',
+  'v: SIP/2.0/TCP 192.168.1.84:5060',
+  'f: <sip:user@hermes.local>;tag=abc',
+  't: <sip:bot@hermes.local>',
+  'i: compact-call', 'CSeq: 1 INVITE', 'l: 0', '', '',
+].join('\r\n'));
+assert.equal(parseSip(compact).headers['call-id'],'compact-call');
+const tunnel = encodeNativeSignal('call-a',message);
+assert.deepEqual(decodeNativeSignal(12,tunnel),{callId:'call-a',sip:message});
+assert.deepEqual(decodeNativeSignal(12,Buffer.from(tunnel.toString().replace(' fid="1"',''))),
+                 {callId:'call-a',sip:message});
+assert.equal(decodeNativeSignal(11,Buffer.from('1 3 7 234889141 0 3 0')),null);
+assert.equal(decodeNativeSignal(12,Buffer.from('<sip><invalid/></sip>')),null);
 const sent = [];
 const native = new NativeCall({
   client:{sendNativeSignal:(to,type,data)=>sent.push({to,type,data})},
   owner:'user@hermes.local',host:'127.0.0.1',xpHost:'192.168.1.84',
   token:'x'.repeat(64),logger:{info:()=>{}, warn:()=>{}, error:()=>{}},
 });
-native.onSignal({sender:'evil@hermes.local',type:1,payload:message});
+native.onSignal({sender:'evil@hermes.local',type:12,payload:tunnel});
 assert.equal(sent.length,0);
-native.onSignal({sender:'user@hermes.local',type:1,payload:message});
+native.onSignal({sender:'user@hermes.local',type:11,payload:Buffer.from('1 3 7 234889141 0 3 0')});
 assert.equal(sent.length,1);
+assert.equal(sent[0].type,11);
+assert.equal(sent[0].data.toString(),'2 3 5 234889141 0 3 0');
+native.onSignal({sender:'user@hermes.local',type:12,payload:tunnel});
+assert.equal(sent.length,2);
 assert.equal(native.call.remote.port,30000);
-assert(sent[0].data.toString().startsWith('SIP/2.0 200'));
-native.onSignal({sender:'user@hermes.local',type:1,payload:message});
-assert(sent[1].data.toString().startsWith('SIP/2.0 486'));
+assert(decodeNativeSignal(sent[1].type,sent[1].data).sip.toString().startsWith('SIP/2.0 200'));
+native.onSignal({sender:'user@hermes.local',type:12,payload:tunnel});
+assert(decodeNativeSignal(sent[2].type,sent[2].data).sip.toString().startsWith('SIP/2.0 486'));
+native.stop();
+""")
+
+    def test_native_bot_offer_and_hangup_keep_wlm_as_audio_frontend(self):
+        self.run_js(r"""
+const assert=require('assert');
+const {NativeCall,decodeNativeSignal}=require('./native_call.js');
+const sent=[];
+const native=new NativeCall({
+  client:{email:'hermes-bot@hermes.local',sendNativeSignal:(to,type,body)=>
+    sent.push({to,type,body})},
+  owner:'user@hermes.local',host:'192.168.1.81',xpHost:'192.168.1.84',
+  token:'a'.repeat(64),logger:{info(){},warn(){},error(){}},
+});
+assert.equal(native.invite(),true);
+assert.equal(native.invite(),false);
+const offer=decodeNativeSignal(sent[0].type,sent[0].body);
+assert(offer.sip.toString().includes('m=audio 19740 RTP/AVP 0'));
+assert(!offer.sip.toString().includes('m=video'));
+assert.equal(sent[0].to,'user@hermes.local');
+assert.equal(native.hangup(),true);
+const bye=decodeNativeSignal(sent[1].type,sent[1].body);
+assert(bye.sip.toString().startsWith('BYE sip:user@hermes.local SIP/2.0'));
+assert.equal(native.hangup(),false);
 native.stop();
 """)
 

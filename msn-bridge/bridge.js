@@ -83,8 +83,8 @@ standaloneServer.on('error', error => {
 const client = new MSNClient(email, password);
 let nativeCall = null;
 if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
-  if (process.env.MSN_BOT_PROTOCOL !== '13') {
-    console.error('Native MSN calling requires MSN_BOT_PROTOCOL=13');
+  if (!['13','18'].includes(process.env.MSN_BOT_PROTOCOL)) {
+    console.error('Native MSN calling requires MSN_BOT_PROTOCOL=13 or 18');
     process.exit(2);
   }
   const host = process.env.HERMES_MSN_NATIVE_IP;
@@ -203,6 +203,27 @@ client.on('msg', msg => {
   const owner = String(process.env.HERMES_MSN_OWNER_EMAIL || '').trim().toLowerCase();
   if (!owner || msg.user.trim().toLowerCase() !== owner) return;
   const command = msg.body.trim().toLowerCase();
+  if (command === '/nativecall' || (command === '/call' && nativeCall)) {
+    if (!nativeCall) {
+      client.sendMessage(owner, 'Native MSN calling is disabled on Hermes.');
+      return;
+    }
+    try {
+      client.sendMessage(owner, nativeCall.invite()
+        ? 'Native Messenger call invitation sent.'
+        : 'Hermes is already handling a native call.');
+    }catch(error) {
+      console.error('Native MSN invite failed:', error.message);
+      client.sendMessage(owner, 'Native MSN call negotiation failed.');
+    }
+    return;
+  }
+  if (command === '/hangup' && nativeCall) {
+    client.sendMessage(owner, nativeCall.hangup()
+      ? 'Native Messenger call ended.'
+      : 'No native Messenger call is active.');
+    return;
+  }
   if (command === '/call' || command === '/hangup') {
     const now = Date.now();
     if (command === '/call' && now - lastVoiceCommand < 2000) return;

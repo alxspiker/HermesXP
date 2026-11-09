@@ -1,6 +1,8 @@
 var net = require('net');
+const crypto = require('crypto');
 var msnsocket = require('./MSNHelper.js');
 const { MSNPFrameDecoder } = require('./frame.js');
+const { loginSSO } = require('./sso.js');
 const axios = require('axios');
 const https = require('https');
 const EventEmitter = require('events');
@@ -17,10 +19,11 @@ const MSN_LOGIN_URL = process.env.MSN_LOGIN_URL || 'https://msnmsgr.escargot.cha
 // MSN_LOGIN_INSECURE=1: accept a self-signed/local-CA cert on an https login
 // URL (only for a local server; never for Escargot).
 const MSN_LOGIN_INSECURE = process.env.MSN_LOGIN_INSECURE === '1';
-const MSN_PROTOCOL = process.env.MSN_BOT_PROTOCOL === '13' ? 'MSNP13' : 'MSNP9';
+const MSN_PROTOCOL = process.env.MSN_BOT_PROTOCOL === '18' ? 'MSNP18' :
+                     process.env.MSN_BOT_PROTOCOL === '13' ? 'MSNP13' : 'MSNP9';
 // MSNP13 is required for UUN / UBN (tunneled SIP); default remains MSNP9
 // until the native-call feature is explicitly enabled and verified.
-const MSN_NATIVE_CALL = MSN_PROTOCOL === 'MSNP13';
+const MSN_NATIVE_CALL = MSN_PROTOCOL !== 'MSNP9';
 // MSNC4 + SIP invites + tunneled SIP. Never advertise codecs unsupported by
 // the actual call engine. WLM 2009 may require MSNP16 SSO capabilities.
 const MSN_NATIVE_CAPS = 0x40300000;
@@ -43,6 +46,7 @@ class MSNClient extends EventEmitter  {
 
 		this.switchboard = [];
 		this.frameDecoder = new MSNPFrameDecoder();
+		this.machineGuid = '{' + crypto.randomUUID().toUpperCase() + '}';
 	}
 
 	execute() {
@@ -76,7 +80,20 @@ class MSNClient extends EventEmitter  {
 
 					if(element[0] == 'CVR') {
 						console.log('[DEBUG] [AUTH] Trying to log in...')
-						this.client.write('USR 3 TWN I ' + this.login + endTag);
+						this.client.write('USR 3 ' + (MSN_PROTOCOL === 'MSNP18' ? 'SSO' : 'TWN') + ' I ' + this.login + endTag);
+					}
+
+					if(element[0] === 'USR' && element[2] === 'SSO' && element[3] === 'S'){
+						try{
+						  const proof = await loginSSO('http://127.0.0.1:8081/RST2.srf',
+						    this.login, this.password, element[5]);
+						  this.client.write('USR 4 SSO S ' + proof.token + ' ' + proof.proof +
+						    ' ' + this.machineGuid + endTag);
+						  this.client.write('CHG 5 NLN ' + MSN_NATIVE_CAPS + ':0' + endTag);
+						} catch(error){
+						  this.emit('error',new Error('MSNP18 SSO login failed: '+error.message));
+						  this.client.destroy();
+						}
 					}
 
 					if(element[0] == 'USR' && element[2] == 'TWN'){
@@ -109,6 +126,7 @@ class MSNClient extends EventEmitter  {
 					if(element[0] == 'USR' && element[2] == 'OK'){
 						this.email = element[3];
 						this.name = element[4];
+						this.active = true;
 						this.emit('msg', {'type': 'connected'});
 					}
 
@@ -294,7 +312,8 @@ class MSNSwitchBoard extends EventEmitter {
 		this.switchboard.on('data',  data => {
 			this.TrID++;
 			let parsed = msnsocket.parseMessageSB(data, this.email);
-			console.log('[DEBUG] [SWITCHBOARD: ' + this.ThreadID + '] recv:', JSON.stringify(parsed));
+			if (process.env.MSN_DEBUG === '1')
+				console.log('[DEBUG] [SWITCHBOARD] event type:', parsed && parsed.type);
 			if(parsed.type == 'joinedChat') {
 				this.sendMessage(this.tmpMessage);
 			}else if(parsed.type == 'authSuccess') {

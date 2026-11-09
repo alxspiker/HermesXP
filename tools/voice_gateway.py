@@ -164,11 +164,13 @@ class VoiceState:
             transcript = transcribe(pcm)
             if not transcript:
                 raise ValueError("No speech detected")
+            log.info("Native/companion speech turn transcribed (%d characters)", len(transcript))
             with self.lock:
                 past = list(self.histories.get(owner, []))
             messages = [{"role": "system", "content": SYSTEM_PROMPT}] + past + [
                 {"role": "user", "content": transcript}]
             reply = ask_hermes(messages)
+            log.info("Hermes produced a voice response (%d characters)", len(reply))
             audio = synthesize(reply)
             if not audio or len(audio) > MAX_OUTPUT:
                 raise ValueError("Invalid speech response")
@@ -178,6 +180,7 @@ class VoiceState:
                             {"role": "assistant", "content": reply}]
                 )[-16:]
                 self.turns[turn_id].update(state="done", audio=audio)
+            log.info("Speech turn ready for playback (%d PCM bytes)", len(audio))
         except Exception:
             log.exception("Voice turn failed (%s)", turn_id)
             with self.lock:
@@ -202,7 +205,12 @@ def make_handler(state: VoiceState, *, native: bool = False):
         sys_version = ""
 
         def log_message(self, fmt, *args):
-            log.info("%s - %s", self.address_string(), fmt % args)
+            message = fmt % args
+            # Polling an agent every second is normal and not a diagnostic
+            # event. Avoid filling the systemd journal with pending receipts.
+            if "/voice/turn/" in message and '" 202 ' in message:
+                return
+            log.info("%s - %s", self.address_string(), message)
 
         def _reply(self, status: int, body: bytes = b"", content_type="text/plain"):
             self.send_response(status)
@@ -263,6 +271,16 @@ def make_handler(state: VoiceState, *, native: bool = False):
             device = self._device()
             if not device:
                 self._reply(403, b"unauthorized")
+                return
+            if native and self.path == "/voice/greeting":
+                try:
+                    audio = synthesize("Hello. This is Hermes. I'm listening.")
+                    if not 0 < len(audio) <= MAX_OUTPUT:
+                        raise ValueError("Invalid greeting audio")
+                    self._reply(200, audio, "application/octet-stream")
+                except Exception:
+                    log.exception("Native Messenger greeting synthesis failed")
+                    self._reply(502, b"speech synthesis unavailable")
                 return
             prefix = "/voice/turn/"
             if not self.path.startswith(prefix):

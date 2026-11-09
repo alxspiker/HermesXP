@@ -2,6 +2,7 @@
 import http.client
 import importlib.util
 import io
+import os
 from pathlib import Path
 import sys
 from threading import Thread
@@ -115,6 +116,31 @@ class TestVoiceServer(unittest.TestCase):
             self.assertEqual(code, 429)
         finally:
             gate.release()
+
+    def test_native_greeting_only_on_authenticated_loopback_worker(self):
+        with (patch.dict(os.environ, {"HERMES_MSN_BRIDGE_TOKEN": self.token}),
+              patch.object(v, "synthesize", return_value=b"\0\0" * 1600) as tts):
+            server = v.ThreadingHTTPServer(("127.0.0.1", 0),
+                                           v.make_handler(self.state, native=True))
+            thread = Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                def fetch(token):
+                    connection = http.client.HTTPConnection(
+                        "127.0.0.1", server.server_port, timeout=3)
+                    connection.request("GET", "/voice/greeting",
+                                       headers={"X-Hermes-Token": token})
+                    reply = connection.getresponse()
+                    status, payload = reply.status, reply.read()
+                    connection.close()
+                    return status, payload
+                self.assertEqual(fetch("wrong")[0], 403)
+                self.assertEqual(fetch(self.token), (200, b"\0\0" * 1600))
+                tts.assert_called_once()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(3)
 
 
 if __name__ == "__main__":

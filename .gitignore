@@ -5,3 +5,4 @@ __pycache__/
 catest.exe
 dist/HermesXP-old.exe
 dist/SHA256SUMS
+dist/RELEASE.json

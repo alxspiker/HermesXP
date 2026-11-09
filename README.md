@@ -33,6 +33,14 @@ The update watcher and 15-minute retry timer are systemd user units on
 the Hermes host. Neither the updater nor this change configures any outbound
 XP firewall restriction; that is a separate decision.
 
+**Release publishing without paid GitHub Actions:** The maintainer runs
+`bash local-server/publish-release.sh --dry-run` on Linux to compile/test,
+then `bash local-server/publish-release.sh --draft` to create a private
+GitHub release draft with generic XP binaries. After validating startup and
+rollback on an actual XP laptop, run `bash local-server/publish-release.sh
+--publish`. No private certificates or tokens are uploaded; the XP device
+does not connect to GitHub.
+
 ## Installing HermesXP on Windows XP
 
 **Use `HermesXP-Setup.exe`, not a loose copy of `HermesXP.exe`.** The NSIS

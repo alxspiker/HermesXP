@@ -20,5 +20,25 @@ class TestPE(unittest.TestCase):
         self.assertIn(b'KERNEL32.dll',b)
         self.assertIn(b'USER32.dll',b)
         self.assertIn(b'WS2_32.dll',b)
+        # The former dummy __chkstk routine was a no-op: Windows x86
+        # functions larger than 4 KiB never allocated their stack frame.
+        self.assertGreaterEqual(struct.unpack_from('<I',b,opt+76)[0],65536)
+
+    def test_build_never_uses_broken_stack_probe_stub(self):
+        build=(HERE/'xp-client'/'build.sh').read_text()
+        self.assertIn('-mno-stack-arg-probe',build)
+        self.assertIn('/stack:1048576,65536',build)
+        self.assertNotIn('chkstk.obj',build)
+        self.assertFalse((HERE/'xp-client'/'chkstk.s').exists())
+
+    def test_headless_wifi_scan_does_not_include_credentials(self):
+        source=(HERE/'xp-client'/'hermesxp.c').read_text()
+        self.assertIn('str_find(cl,"/wifi-scan")',source)
+        self.assertIn('write_wifi_scan_report()',source)
+        # Scanning reports SSIDs only, never key material.
+        a=source.index('static void write_wifi_scan_report(void)')
+        z=source.index('static int same_ssid(',a)
+        self.assertNotIn('g_wifi_password',source[a:z])
+        self.assertNotIn('g_ownerPw',source[a:z])
 
 if __name__=='__main__':unittest.main()

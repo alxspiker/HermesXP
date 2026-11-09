@@ -196,6 +196,7 @@ static int g_wifi_security[32];
 static int g_wifi_count;
 static char g_remote_token[65], g_remote_allowed_ip[16];
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
+static void append_number(char *out,int *pos,unsigned int value);
 static void update_status(const char *s){ SetWindowTextA(g_status,s); }
 static HWND add(const char *kind,const char *text,DWORD style,int x,int y,int w,int h,HWND parent,int id){
  return CreateWindowExA(0,kind,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,parent,(void*)id,g_instance,NULL);
@@ -301,7 +302,24 @@ static void scan_wifi(void){
  if(!g_wifi_count){ update_status("No visible Wi-Fi networks found."); return; }
  g_wifi_guid=selected;
  SendMessageA(g_wifi_list,CB_SETCURSEL,0,0);
- update_status("Choose a Wi-Fi network. Connection/profile support is next.");
+ update_status("Choose a Wi-Fi network, enter its password and click Connect Wi-Fi.");
+}
+/* Headless Wi-Fi scan diagnostic for an XP shell or agent. No passwords. */
+static void write_wifi_scan_report(void){
+ HANDLE f=CreateFileA("C:\\HermesXP\\wifi-scan.txt",GENERIC_WRITE,FILE_SHARE_READ,NULL,2,0,NULL);
+ if(f!=(HANDLE)-1){
+  DWORD n; int i; char line[180];
+  GetWindowTextA(g_status,line,sizeof(line));
+  WriteFile(f,line,(DWORD)strlen0(line),&n,NULL);
+  WriteFile(f,"\r\n",2,&n,NULL);
+  for(i=0;i<g_wifi_count && i<32;i++){
+   line[0]=0;
+   SendMessageA(g_wifi_list,0x0148,(WPARAM)i,(LPARAM)line); /* CB_GETLBTEXT */
+   WriteFile(f,line,(DWORD)strlen0(line),&n,NULL);
+   WriteFile(f,"\r\n",2,&n,NULL);
+  }
+  CloseHandle(f);
+ }
 }
 static int same_ssid(const WLAN_DOT11_SSID *a,const WLAN_DOT11_SSID *b){
  int i; if(a->uSSIDLength!=b->uSSIDLength) return 0;
@@ -1173,16 +1191,21 @@ void WINAPI WinMainCRTStartup(void){
     and exits without opening the window. */
  { const char *cl=GetCommandLineA();
    if(cl && str_find(cl,"/screenshot")){ take_screenshot(); ExitProcess(0); } }
- /* Background authenticated screenshot and narrow UI-action listener. */
- CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
- /* Start the interactive XP GUI while the screenshot listener runs in background. */
+ /* Initialize the interactive GUI before starting the optional listener. */
  c.style=0; c.lpfnWndProc=window_proc; c.cbClsExtra=0; c.cbWndExtra=0;
  c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
  c.lpszMenuName=NULL; c.lpszClassName="HermesXPMainWindow";
  if(!RegisterClassA(&c))ExitProcess(2);
  h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,410,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
+ /* Background authenticated screenshot and narrow UI-action listener. */
+ CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
  ShowWindow(h,5);UpdateWindow(h);
+ { const char *cl=GetCommandLineA();
+   if(cl && str_find(cl,"/wifi-scan")){
+     scan_wifi();write_wifi_scan_report();DestroyWindow(h);ExitProcess(0);
+   }
+ }
  while(GetMessageA(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageA(&msg);}
  ExitProcess((UINT)msg.wParam);
 }

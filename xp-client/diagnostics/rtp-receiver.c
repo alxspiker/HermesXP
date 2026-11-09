@@ -1,10 +1,11 @@
 /*
  * Read-only Windows XP RTP arrival diagnostic. Not a packet logger:
  * it never stores or prints audio payloads, IP conversations, or addresses.
- * Observe IPv4 UDP PCMU RTP sent by the paired Hermes host to RUITER.
+ * Receive a controlled, silent IPv4 UDP PCMU RTP test stream from Hermes.
  *
- * Raw-IP capture requires local administrator rights on Windows XP.
- * Runs for a bounded 25 seconds and restores Winsock state on exit.
+ * Uses ordinary UDP sockets (not raw socket packet capture) and listens on
+ * port 45678 for 25 seconds. It cannot inspect Messenger's audio buffers.
+ * It measures the network/IP/Winsock receive timing on the same XP host.
  * The output is aggregate RTP header/arrival counters only.
  */
 #define WINAPI __attribute__((stdcall))
@@ -24,11 +25,10 @@ IMPORT int WINAPI WSACleanup(void);
 IMPORT SOCKET WINAPI socket(int, int, int);
 IMPORT int WINAPI bind(SOCKET, const void *, int);
 IMPORT int WINAPI closesocket(SOCKET);
-IMPORT int WINAPI recv(SOCKET, char *, int, int);
+IMPORT int WINAPI recvfrom(SOCKET, char *, int, int, void *, int *);
 IMPORT int WINAPI setsockopt(SOCKET, int, int, const char *, int);
-IMPORT int WINAPI WSAIoctl(SOCKET, DWORD, void *, DWORD, void *, DWORD,
-                          DWORD *, void *, void *);
 IMPORT DWORD WINAPI inet_addr(const char *);
+IMPORT unsigned short WINAPI htons(unsigned short);
 IMPORT int WINAPI WSAGetLastError(void);
 IMPORT BOOL WINAPI QueryPerformanceCounter(QPC *);
 IMPORT BOOL WINAPI QueryPerformanceFrequency(QPC *);
@@ -38,9 +38,9 @@ IMPORT BOOL WINAPI WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
 IMPORT void WINAPI ExitProcess(DWORD);
 
 #define AF_INET 2
-#define SOCK_RAW 3
-#define IPPROTO_IP 0
-#define SIO_RCVALL 0x98000001u
+#define SOCK_DGRAM 2
+#define IPPROTO_UDP 17
+#define RECEIVE_PORT 45678
 #define SO_RCVTIMEO 0x1006
 #define SOL_SOCKET 0xFFFF
 #define INVALID_SOCKET 0xFFFFFFFFu
@@ -70,23 +70,11 @@ static void key(const char *s, DWORD value) {
 static unsigned short be16(const unsigned char *p) {
   return (unsigned short)(((unsigned int)p[0] << 8) | p[1]);
 }
-static int is_rtp(const unsigned char *data, int size, unsigned short *port,
-                  unsigned short *seq) {
-  int ihl, len, udp;
-  if (size < 20 || (data[0] >> 4) != 4 || data[9] != 17) return 0;
-  ihl = (data[0] & 15) * 4;
-  if (ihl < 20 || size < ihl + 8 + 12 + 160) return 0;
-  if (data[12] != 192 || data[13] != 168 || data[14] != 1 || data[15] != 81)
-    return 0;
-  if (data[16] != 192 || data[17] != 168 || data[18] != 1 || data[19] != 84)
-    return 0;
-  len = (int)be16(data + 2);
-  if (len > size || len < ihl + 8 + 12 + 160) return 0;
-  udp = ihl;
-  if (be16(data + udp + 4) < 8 + 12 + 160) return 0;
-  if ((data[udp + 8] >> 6) != 2 || (data[udp + 9] & 0x7f) != 0) return 0;
-  *port = be16(data + udp + 2);
-  *seq = be16(data + udp + 8 + 2);
+static int is_rtp(const unsigned char *data, int size, unsigned short *seq) {
+  /* 12-byte RTP header + exactly 160 bytes G.711 PCMU per 20ms frame. */
+  if (size != 172 || (data[0] >> 6) != 2 || (data[1] & 0x7f) != 0 ||
+      (data[0] & 0x3f) != 0) return 0;
+  *seq = be16(data + 2);
   return 1;
 }
 static void fail(const char *stage, DWORD error) {
@@ -97,12 +85,12 @@ static void fail(const char *stage, DWORD error) {
 void WINAPI mainCRTStartup(void) {
   char wsa[512];
   unsigned char packet[8192];
-  SOCKADDR_IN local;
-  DWORD on = 1, bytes = 0, start = 0;
+  SOCKADDR_IN local, sender;
+  DWORD start = 0;
   DWORD packets = 0, under15 = 0, over25 = 0, over40 = 0;
   DWORD maxgap = 0, mingap = 99999, loss = 0, duplicates = 0;
   DWORD started = 0, ticks_per_ms = 0, last_low = 0;
-  unsigned short last_port = 0, last_seq = 0;
+  unsigned short last_seq = 0;
   SOCKET sock = INVALID_SOCKET;
   QPC freq, clock;
   int active = 0;
@@ -115,21 +103,17 @@ void WINAPI mainCRTStartup(void) {
     fail("QueryPerformanceCounter", 0); WSACleanup(); ExitProcess(3);
   }
   ticks_per_ms = freq.low / 1000;
-  sock = socket(AF_INET, SOCK_RAW, IPPROTO_IP);
+  sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (sock == INVALID_SOCKET) {
-    fail("raw_socket", (DWORD)WSAGetLastError()); WSACleanup(); ExitProcess(4);
+    fail("udp_socket", (DWORD)WSAGetLastError()); WSACleanup(); ExitProcess(4);
   }
   local.family = AF_INET;
-  local.port = 0;
+  local.port = htons(RECEIVE_PORT);
   local.address = inet_addr("192.168.1.84");
   for (int i=0;i<8;i++) local.padding[i] = 0;
   if (bind(sock, &local, sizeof(local)) != 0) {
     fail("bind", (DWORD)WSAGetLastError()); closesocket(sock);
     WSACleanup(); ExitProcess(5);
-  }
-  if (WSAIoctl(sock, SIO_RCVALL, &on, 4, 0, 0, &bytes, 0, 0) != 0) {
-    fail("SIO_RCVALL", (DWORD)WSAGetLastError()); closesocket(sock);
-    WSACleanup(); ExitProcess(6);
   }
   /* SO_RCVTIMEO makes recv() unblock each second, including on an idle XP
      desktop, so the diagnostic is guaranteed to exit in about 25s. */
@@ -138,29 +122,30 @@ void WINAPI mainCRTStartup(void) {
     if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
                    (const char *)&timeout_ms, sizeof(timeout_ms)) != 0) {
       fail("receive_timeout", (DWORD)WSAGetLastError());
-      on = 0; WSAIoctl(sock, SIO_RCVALL, &on, 4, 0, 0, &bytes, 0, 0);
       closesocket(sock); WSACleanup(); ExitProcess(7);
     }
   }
-  put("READY xp_receiver=192.168.1.84 capture_ms=25000 qpc_hz=");
+  put("READY xp_udp_receiver_port=45678 capture_ms=25000 qpc_hz=");
   num(freq.low); put("\r\n"); emit();
   start = GetTickCount();
   while ((DWORD)(GetTickCount() - start) < CAPTURE_MS) {
-    int size = recv(sock, (char *)packet, sizeof(packet), 0);
-    unsigned short port, seq;
+    int senderlen = sizeof(sender);
+    int size = recvfrom(sock, (char *)packet, sizeof(packet), 0,
+                        &sender, &senderlen);
+    unsigned short seq;
     if (size < 0) {
       int error = WSAGetLastError();
       if (error == 10060 || error == 10035) continue;
       fail("recv", (DWORD)error);
       break;
     }
-    if (!is_rtp(packet, size, &port, &seq)) continue;
+    if (sender.address != inet_addr("192.168.1.81") ||
+        !is_rtp(packet, size, &seq)) continue;
     QueryPerformanceCounter(&clock);
-    if (!active || port != last_port) {
-      if (active) { put("PORT_SWITCH\r\n"); emit(); }
-      active = 1; last_low = clock.low; last_port = port;
+    if (!active) {
+      active = 1; last_low = clock.low;
       last_seq = seq; started = 0;
-      put("RTP destination_port="); num(port); put("\r\n"); emit();
+      put("RTP received\r\n"); emit();
     } else {
       DWORD gap = (clock.low - last_low) / ticks_per_ms;
       unsigned short step = (unsigned short)(seq - last_seq);
@@ -179,8 +164,6 @@ void WINAPI mainCRTStartup(void) {
     }
     packets++;
   }
-  on = 0;
-  WSAIoctl(sock, SIO_RCVALL, &on, 4, 0, 0, &bytes, 0, 0);
   closesocket(sock);
   WSACleanup();
   put("SUMMARY ");

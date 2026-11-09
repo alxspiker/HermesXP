@@ -1,5 +1,38 @@
 # HermesXP / MSN Messenger Bridge — prototype
 
+### Plugin-managed updates (v0.3)
+
+Install the entire Git repository as a Hermes plugin:
+
+```bash
+hermes plugins install https://github.com/alxspiker/HermesXP.git --enable
+```
+
+The plugin contains the host-side MSN platform/server setup, both XP
+executables, an authenticated updater, and a versioned release fetcher. Follow
+the plugin's `after-install.md` **once** to provision the host services,
+install XP, and pair the laptop (the XP installer can be copied over USB).
+Subsequently, a normal `hermes plugins update hermes-msn` triggers an XP
+client update automatically. The update timer retries offline machines.
+
+**No XP-to-GitHub connection is required.** The Hermes computer downloads
+prebuilt, checksum-verified release binaries when the release matches its
+installed plugin revision. If no matching release exists, it builds with
+Clang/LLVM on the Hermes computer. The XP receives a SHA-256-checked image
+via its authenticated, IP-restricted LAN listener; a separate small rollback
+helper replaces the EXE, starts it and restores the prior version if the
+replacement fails its local startup health check.
+
+Pairing secrets are stored in `~/.hermes/hermesxp-devices.json` on the Hermes
+host (0600), outside the Git checkout. A separate token is required for each
+XP laptop. Tokens are never embedded in public release assets or the public
+LAN installer. Existing XP users must install v0.3 once to acquire the new
+updater helper.
+
+The update watcher and 15-minute retry timer are systemd user units on
+the Hermes host. Neither the updater nor this change configures any outbound
+XP firewall restriction; that is a separate decision.
+
 ## Installing HermesXP on Windows XP
 
 **Use `HermesXP-Setup.exe`, not a loose copy of `HermesXP.exe`.** The NSIS
@@ -41,7 +74,9 @@ The XP companion is **not an agent runtime or remote execution service**. It is 
 | File | Runs on | Function |
 |---|---|---|
 | `dist/HermesXP.exe` | Windows XP SP3 x86 | Win32 graphical probe, no external DLLs / CRT / WMI |
-| `hermes-plugin/hermes-msn/plugin.yaml` + `adapter.py` | Hermes host, Python | Registers platform `hermes_msn`; handles inbound/outbound messages |
+| Root `plugin.yaml`, `adapter.py` and `__init__.py` | Hermes host, Python | Full Git-backed Hermes plugin; updates through `hermes plugins update hermes-msn` |
+| `tools/update_manager.py`, `tools/hermesxp_update.py` | Hermes host, Python | Verifies releases or builds locally and distributes authenticated updates to paired XP machines |
+| `dist/HermesXP-Updater.exe` | Windows XP SP3 x86 | Separate restart-and-rollback helper |
 | `msn-bridge/bridge.js` | Hermes host, Node 18+ | Connects MSN bot to Hermes via authenticated localhost JSON-lines |
 | `msn-bridge/msnclient/` | Hermes host, Node | Patched copy of tutmonde/msnclient (GPLv3) — server host/login URL come from env, see `LOCAL-PATCH.md` |
 | `local-server/install.sh` | Hermes host (ZBook), bash | One-time installer: downloads msn-server, creates accounts, starts services, sets up TLS |
@@ -80,7 +115,7 @@ If it fails, check host IP, Windows/host firewall, routing, and that port 18765 
 
 ## Step B: install Hermes gateway adapter on the modern host
 
-1. Copy `hermes-plugin/hermes-msn` to `~/.hermes/plugins/hermes-msn` on the **Hermes host**, not on XP.
+1. Install the **whole repository** on the Hermes host with `hermes plugins install https://github.com/alxspiker/HermesXP.git --enable`. Do not copy just the legacy `hermes-plugin/hermes-msn` subfolder; an isolated subfolder cannot receive the build tools or native Git updates.
 2. Generate a secret locally on the host: `python3 -c 'import secrets; print(secrets.token_hex(32))'`
 3. Set the following in your Hermes **profile's** `.env` (or service environment). The same token must be supplied to the Node bridge; keep it secret. The owner/bot accounts are created by the Step C installer as `user@hermes.local` / `hermes-bot@hermes.local` (defaults — override with --owner-email / --bot-email, or set them in .env):
 

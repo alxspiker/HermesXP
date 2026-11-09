@@ -13,7 +13,7 @@ command -v makensis >/dev/null 2>&1 || {
   echo "[xp-installer] NSIS compiler missing (install the free nsis package)" >&2
   exit 3
 }
-for name in HermesXP.exe hermesxp.ini ca.pem escargot.dll \
+for name in HermesXP.exe HermesXP-Updater.exe hermesxp.ini ca.pem escargot.dll \
             msnmsgr.exe-escargot.ini wlcomm.exe-escargot.ini README.txt; do
   test -s "$STAGE/$name" || {
     echo "[xp-installer] Required package file missing: $name" >&2

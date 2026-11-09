@@ -5,7 +5,9 @@ Wants=network-online.target msn-server.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/HermesXP/local-server/update-xp.sh %h/HermesXP
+ExecStart=__REPO_ROOT__/local-server/update-xp.sh __REPO_ROOT__
+
+TimeoutStartSec=240
 
 [Install]
 WantedBy=default.target

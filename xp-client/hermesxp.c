@@ -40,6 +40,7 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define SOCK_STREAM 1
 #define IPPROTO_TCP 6
 #define SOL_SOCKET 0xFFFF
+#define SO_REUSEADDR 0x0004
 #define SO_SNDTIMEO 0x1005
 #define SO_RCVTIMEO 0x1006
 #define INVALID_SOCKET ((unsigned int)~0u)
@@ -73,6 +74,7 @@ IMPORT BOOL WINAPI TranslateMessage(const MSG *);
 IMPORT LRESULT WINAPI DispatchMessageA(const MSG *);
 IMPORT void WINAPI PostQuitMessage(int);
 IMPORT BOOL WINAPI DestroyWindow(HWND);
+IMPORT BOOL WINAPI PostMessageA(HWND,UINT,WPARAM,LPARAM);
 IMPORT int WINAPI MessageBoxA(HWND,const char *,const char *,UINT);
 IMPORT int WINAPI GetWindowTextA(HWND,char *,int);
 IMPORT UINT WINAPI SetTimer(HWND,UINT,UINT,void *);
@@ -100,6 +102,8 @@ IMPORT BOOL WINAPI WritePrivateProfileStringA(const char *,const char *,const ch
 IMPORT DWORD WINAPI GetModuleFileNameA(HINSTANCE,char *,DWORD);
 IMPORT DWORD WINAPI GetFileAttributesA(const char *);
 IMPORT BOOL WINAPI CopyFileA(const char *,const char *,BOOL);
+IMPORT BOOL WINAPI DeleteFileA(const char *);
+IMPORT BOOL WINAPI MoveFileExA(const char *,const char *,DWORD);
 IMPORT void *WINAPI GetProcessHeap(void);
 IMPORT void *WINAPI HeapAlloc(void *,DWORD,DWORD);
 IMPORT BOOL WINAPI HeapFree(void *,DWORD,void *);
@@ -112,6 +116,7 @@ IMPORT DWORD WINAPI WaitForSingleObject(HANDLE,DWORD);
 IMPORT void WINAPI Sleep(DWORD);
 IMPORT BOOL WINAPI CreateProcessA(const char *,char *,void *,void *,BOOL,DWORD,void *,const char *,void *,void *);
 IMPORT BOOL WINAPI GetExitCodeProcess(HANDLE,DWORD *);
+IMPORT BOOL WINAPI TerminateProcess(HANDLE,UINT);
 IMPORT UINT WINAPI GetWindowsDirectoryA(char *,UINT);
 IMPORT HANDLE WINAPI CreateThread(void *,DWORD,void *,void *,DWORD,DWORD *);
 IMPORT BOOL WINAPI CreateDirectoryA(const char *,void *);
@@ -150,6 +155,10 @@ IMPORT LONG WINAPI RegCloseKey(void *);
 IMPORT BOOL WINAPI CryptAcquireContextA(void **,const char *,const char *,DWORD,DWORD);
 IMPORT BOOL WINAPI CryptGenRandom(void *,DWORD,unsigned char *);
 IMPORT BOOL WINAPI CryptReleaseContext(void *,DWORD);
+IMPORT BOOL WINAPI CryptCreateHash(void *,DWORD,void *,DWORD,void **);
+IMPORT BOOL WINAPI CryptHashData(void *,const unsigned char *,DWORD,DWORD);
+IMPORT BOOL WINAPI CryptGetHashParam(void *,DWORD,unsigned char *,DWORD *,DWORD);
+IMPORT BOOL WINAPI CryptDestroyHash(void *);
 
 /* Adapter info (iphlpapi) for the default-gateway check. */
 IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
@@ -182,7 +191,7 @@ IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
 #define SRCCOPY 0x00CC0020
 #define DIB_RGB_COLORS 0
 
-static HINSTANCE g_instance; static HWND g_host, g_status, g_network_status;
+static HINSTANCE g_instance; static HWND g_host, g_status, g_network_status, g_main_window;
 static char g_remote_token[65], g_remote_allowed_ip[16];
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
 static void append_number(char *out,int *pos,unsigned int value){
@@ -839,6 +848,7 @@ static int http_header_end(const char *req,int len){
  int i; for(i=0;i<=len-4;i++) if(req[i]=='\r'&&req[i+1]=='\n'&&req[i+2]=='\r'&&req[i+3]=='\n') return i+4;
  return 0;
 }
+static int request_is(const char *req,const char *method,const char *path);
 static int read_http_request(unsigned int sock,char *req,int cap,int *outLen,int *bodyLen){
  int used=0,header=0,hasLength=0,contentLength=0,expected=-1;
  while(used<cap-1){
@@ -848,6 +858,9 @@ static int read_http_request(unsigned int sock,char *req,int cap,int *outLen,int
   if(!header){
    header=http_header_end(req,used);
    if(header){
+    if(request_is(req,"POST","/update/exe") || request_is(req,"POST","/update/helper")){
+     *outLen=used;*bodyLen=-1;return 1; /* streamed, not 512-byte UI action */
+    }
     if(!hermesxp_remote_content_length(req,&contentLength,&hasLength)) return 0;
     if((str_find(req,"POST ")==req) && !hasLength) return 0;
     expected=header+(hasLength?contentLength:0);
@@ -878,6 +891,7 @@ static int request_is(const char *req,const char *method,const char *path){
  if(req[i++]!=' ')return 0;
  {int j=0;while(path[j]){if(req[i+j]!=path[j])return 0;j++;}return req[i+j]==' ';}
 }
+#include "update_receiver.h"
 static void press_key(BYTE vk){ keybd_event(vk,0,0,NULL); keybd_event(vk,0,KEYEVENTF_KEYUP,NULL); }
 static int do_remote_ui(unsigned int sock,const char *req,int bodyLen){
  int header=http_header_end(req,strlen0(req)); const char *body=req+header;
@@ -931,9 +945,20 @@ static DWORD WINAPI screenshot_server(void *param){
  if(WSAStartup(0x0202,wsadata)!=0) return 1;
  srv=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);
  if(srv==INVALID_SOCKET){ WSACleanup(); return 1; }
+ /* Updating a running XP companion closes a listener with recent TCP
+    connections in TIME_WAIT. Without SO_REUSEADDR, the replacement GUI
+    starts successfully but its server thread permanently exits on bind().
+    Retry as well: XP sometimes needs a short socket teardown window. */
+ {int reuse=1;setsockopt(srv,SOL_SOCKET,SO_REUSEADDR,(const char*)&reuse,sizeof(reuse));}
  addr.sin_family=AF_INET; addr.sin_port=htons(18768); addr.sin_addr=0;
  { int i; for(i=0;i<8;i++) addr.sin_zero[i]=0; }
- if(bind(srv,&addr,sizeof(addr))!=0){ closesocket(srv); WSACleanup(); return 1; }
+ {int retry,ok=0;
+  for(retry=0;retry<180;retry++){
+   if(bind(srv,&addr,sizeof(addr))==0){ok=1;break;}
+   Sleep(500);
+  }
+  if(!ok){closesocket(srv);WSACleanup();return 1;}
+ }
  if(listen(srv,5)!=0){ closesocket(srv); WSACleanup(); return 1; }
  for(;;){
   char req[1024]; int n,bodyLen; SOCKADDR_IN caddr; int clen=sizeof(caddr); DWORD timeout=3000;
@@ -943,6 +968,13 @@ static DWORD WINAPI screenshot_server(void *param){
   if(read_http_request(cli,req,sizeof(req),&n,&bodyLen)){
    if(!remote_peer_allowed(&caddr) || !hermesxp_remote_authorized(req,g_remote_token)){
     send_http_text(cli,"401 Unauthorized","authentication failed");
+   } else if((request_is(req,"POST","/update/exe") ||
+              request_is(req,"POST","/update/helper")) && bodyLen==-1){
+    handle_update_stream(cli,req,n);
+   } else if(request_is(req,"GET","/update/status") ||
+             request_is(req,"GET","/update/helper-status")){
+    if(bodyLen!=0)send_http_text(cli,"400 Bad Request","status takes no body");
+    else handle_update_status(cli,request_is(req,"GET","/update/helper-status"));
    } else if(request_is(req,"GET","/screenshot.bmp")){
     if(bodyLen!=0){send_http_text(cli,"400 Bad Request","screenshot takes no body");}
     else {
@@ -1053,6 +1085,16 @@ void WINAPI WinMainCRTStartup(void){
  if(!RegisterClassA(&c))ExitProcess(2);
  h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,410,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
+ g_main_window=h;
+ /* Updater candidate validation: load all DLLs, create the custom window,
+    initialize controls, and exit cleanly without opening any listening ports,
+    installing any certificates, or changing system settings. */
+ {const char *cl=GetCommandLineA();
+  if(cl && str_find(cl,"/update-selftest")){
+   DestroyWindow(h);
+   ExitProcess(0);
+  }
+ }
  /* Background authenticated screenshot and narrow UI-action listener. */
  CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
  ShowWindow(h,5);UpdateWindow(h);

@@ -32,3 +32,6 @@ EXPORTS
  _CreateThread@24=CreateThread
  _CreateDirectoryA@8=CreateDirectoryA
  _GetCommandLineA@0=GetCommandLineA
+ _MoveFileExA@12=MoveFileExA
+ _DeleteFileA@4=DeleteFileA
+ _TerminateProcess@8=TerminateProcess

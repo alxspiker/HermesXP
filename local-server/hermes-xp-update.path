@@ -4,6 +4,7 @@ After=hermes-gateway.service
 
 [Path]
 PathChanged=%h/.hermes/plugins/hermes-msn
+PathModified=%h/.hermes/plugins
 Unit=hermes-xp-update.service
 
 [Install]

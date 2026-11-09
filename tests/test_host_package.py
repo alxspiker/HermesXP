@@ -37,10 +37,10 @@ class PackageSecurityTests(unittest.TestCase):
             root = pathlib.Path(td)
             (root / 'build-xp-package.sh').write_text('exit 1\n')
             trace = root / 'trace'
-            wrapper = 'systemctl() { printf "%s\\n" "$*" >> "$TRACE"; }\nwarn() { :; }\n' + section
+            wrapper = 'systemctl() { printf "%s\\n" "$*" >> "$TRACE"; }\nwarn() { :; }\nlog() { :; }\n' + section
             result = subprocess.run(['/bin/bash', '-c', wrapper], env=dict(os.environ, SCRIPT_DIR=td, TRACE=str(trace)), capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(trace.read_text().splitlines(), ['--user disable --now hermes-xp-package.service'])
+            self.assertEqual(trace.read_text().splitlines(), ['--user disable --now hermes-xp-package.service', '--user enable --now hermes-xp-update.path hermes-xp-update.timer'])
 
     def test_package_excludes_passwords_and_stale_staging_files(self):
         with tempfile.TemporaryDirectory(dir=os.environ.get('TMPDIR')) as td:
@@ -56,6 +56,7 @@ class PackageSecurityTests(unittest.TestCase):
             repo = root / 'repo'
             (repo / 'dist').mkdir(parents=True)
             (repo / 'dist/HermesXP.exe').write_bytes(b'exe')
+            (repo / 'dist/HermesXP-Updater.exe').write_bytes(b'updater')
             fakebin = root / 'bin'
             fakebin.mkdir()
             # Skip cross compiler without touching the working checkout.

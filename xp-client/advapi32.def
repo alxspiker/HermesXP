@@ -7,3 +7,7 @@ EXPORTS
  _CryptAcquireContextA@20=CryptAcquireContextA
  _CryptGenRandom@12=CryptGenRandom
  _CryptReleaseContext@8=CryptReleaseContext
+ _CryptCreateHash@20=CryptCreateHash
+ _CryptHashData@16=CryptHashData
+ _CryptGetHashParam@20=CryptGetHashParam
+ _CryptDestroyHash@4=CryptDestroyHash

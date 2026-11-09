@@ -15,6 +15,7 @@ EXPORTS
  _SetWindowTextA@8=SetWindowTextA
  _SetTimer@16=SetTimer
  _KillTimer@8=KillTimer
+ _PostMessageA@16=PostMessageA
  _SendMessageA@16=SendMessageA
  _FindWindowA@8=FindWindowA
  _SetForegroundWindow@4=SetForegroundWindow

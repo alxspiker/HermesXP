@@ -15,6 +15,7 @@ SCRIPT = ROOT / "xp-client/HermesXP-Setup.nsi"
 BUILDER = ROOT / "local-server/build-xp-installer.sh"
 FILES = (
     "HermesXP.exe",
+    "HermesXP-Updater.exe",
     "hermesxp.ini",
     "README.txt",
     "ca.pem",

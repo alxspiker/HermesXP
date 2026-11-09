@@ -50,6 +50,7 @@ Section "HermesXP application" SEC_MAIN
   SetOutPath "$INSTDIR"
 
   File "${INPUT_DIR}/HermesXP.exe"
+  File "${INPUT_DIR}/HermesXP-Updater.exe"
   File "${INPUT_DIR}/README.txt"
   File "${INPUT_DIR}/ca.pem"
   File "${INPUT_DIR}/escargot.dll"
@@ -67,7 +68,7 @@ config_ready:
 
   WriteRegStr HKLM "Software\HermesXP" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayName" "HermesXP"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayVersion" "0.2.1"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayVersion" "0.3.0"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "Publisher" "WM Studios"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "UninstallString" '"$INSTDIR\Uninstall.exe"'
@@ -88,6 +89,9 @@ Section "Uninstall"
   Delete "$SMPROGRAMS\HermesXP\Uninstall HermesXP.lnk"
   RMDir "$SMPROGRAMS\HermesXP"
   Delete "$INSTDIR\HermesXP.exe"
+  Delete "$INSTDIR\HermesXP-Updater.exe"
+  Delete "$INSTDIR\HermesXP.previous.exe"
+  Delete "$INSTDIR\HermesXP.next.exe"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\ca.pem"
   Delete "$INSTDIR\escargot.dll"

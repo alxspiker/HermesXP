@@ -41,7 +41,9 @@ static int hermesxp_remote_authorized(const char *request, const char *token) {
     line_end = request;
     while (*line_end && !(line_end[0] == '\r' && line_end[1] == '\n')) ++line_end;
     if (!*line_end || !(remote_line_prefix(request, "GET /ui/") ||
-        remote_line_prefix(request, "POST /ui/") || remote_line_prefix(request, "GET /screenshot.bmp"))) return 0;
+        remote_line_prefix(request, "POST /ui/") || remote_line_prefix(request, "GET /screenshot.bmp") ||
+        remote_line_prefix(request, "POST /update/exe ") || remote_line_prefix(request, "GET /update/status ") ||
+        remote_line_prefix(request, "POST /update/helper ") || remote_line_prefix(request, "GET /update/helper-status "))) return 0;
     p = line_end + 2;
     while (*p) {
         const char *end = p;

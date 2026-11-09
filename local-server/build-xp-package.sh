@@ -51,13 +51,24 @@ if [ -f "$HERMES_HOME/.env" ]; then
 fi
 log "server $LAN_IP, owner $OWNER_EMAIL"
 
-# 1. Build the exe from source (deterministic build; same source = same bytes).
-bash "$SCRIPT_DIR/build-exe.sh" "$REPO_ROOT" || { echo "[xp-package] exe build failed" >&2; exit 1; }
+# 1. Use verified release/local build artifacts when provided by the plugin
+# updater. Do not mutate a Hermes-managed Git checkout during packaging.
+if [ -n "${HERMESXP_PREBUILT_EXE:-}" ]; then
+    [ -s "$HERMESXP_PREBUILT_EXE" ] || { echo "[xp-package] missing verified exe" >&2; exit 1; }
+    [ -s "${HERMESXP_PREBUILT_UPDATER:-}" ] || { echo "[xp-package] missing verified rollback helper" >&2; exit 1; }
+    CLIENT_EXE="$HERMESXP_PREBUILT_EXE"
+    CLIENT_UPDATER="$HERMESXP_PREBUILT_UPDATER"
+else
+    bash "$SCRIPT_DIR/build-exe.sh" "$REPO_ROOT" || { echo "[xp-package] exe build failed" >&2; exit 1; }
+    CLIENT_EXE="$REPO_ROOT/dist/HermesXP.exe"
+    CLIENT_UPDATER="$REPO_ROOT/dist/HermesXP-Updater.exe"
+fi
 
 # Remove legacy staging data, which may include a previously published password.
 rm -rf -- "$STAGE"
 mkdir -p "$STAGE" "$SWITCHER_DL"
-cp "$REPO_ROOT/dist/HermesXP.exe" "$STAGE/HermesXP.exe"
+cp "$CLIENT_EXE" "$STAGE/HermesXP.exe"
+cp "$CLIENT_UPDATER" "$STAGE/HermesXP-Updater.exe"
 
 # 2. Public connection config. Enter the password privately in Messenger.
 cat > "$STAGE/hermesxp.ini" <<EOF

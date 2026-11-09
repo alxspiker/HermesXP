@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry queued HermesXP LAN updates when XP devices return online
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=30
+Unit=hermes-xp-update.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,22 @@
+name: hermes-msn
+label: Hermes XP MSN Messenger
+kind: platform
+version: 0.3.0
+description: "HermesXP full-source plugin: local MSN bridge/server installer, XP client and rollback helper, and authenticated LAN-only client updater. Windows XP never downloads from GitHub. Initial setup details are in after-install.md."
+requires_env:
+  - name: HERMES_MSN_BRIDGE_TOKEN
+    description: Long random secret shared only between the Hermes plugin and the local MSN bridge process
+    password: true
+  - name: HERMES_MSN_OWNER_EMAIL
+    description: Only this MSN address may send messages to Hermes (lowercase)
+    password: false
+optional_env:
+  - name: HERMES_XP_PROBE_BIND
+    description: Optional local LAN IPv4 bind address for read-only XP connectivity checks (leave blank to disable)
+    password: false
+  - name: MSN_SERVER_HOST
+    description: MSN server the bridge connects to (installer default 127.0.0.1 = local server; leave unset for Escargot)
+    password: false
+  - name: MSN_LOGIN_URL
+    description: Passport login URL the bridge uses (installer default http://127.0.0.1:8081/login = local server)
+    password: false

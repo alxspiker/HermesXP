@@ -15,7 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 EXE="${1:-$REPO_ROOT/dist/HermesXP.exe}"
-XP_HOST="${XP_HOST:-192.168.1.78}"
+XP_HOST="${XP_HOST:-${HERMESXP_HOST:-192.168.1.84}}"
+export HERMESXP_HOST="$XP_HOST"
 PORT="${DEPLOY_PORT:-18766}"
 
 log() { echo "[deploy-exe] $*"; }

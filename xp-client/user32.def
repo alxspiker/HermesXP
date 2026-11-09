@@ -13,6 +13,8 @@ EXPORTS
  _MessageBoxA@16=MessageBoxA
  _GetWindowTextA@12=GetWindowTextA
  _SetWindowTextA@8=SetWindowTextA
+ _SetTimer@16=SetTimer
+ _KillTimer@8=KillTimer
  _SendMessageA@16=SendMessageA
  _FindWindowA@8=FindWindowA
  _SetForegroundWindow@4=SetForegroundWindow

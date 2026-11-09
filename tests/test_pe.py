@@ -31,14 +31,31 @@ class TestPE(unittest.TestCase):
         self.assertNotIn('chkstk.obj',build)
         self.assertFalse((HERE/'xp-client'/'chkstk.s').exists())
 
-    def test_headless_wifi_scan_does_not_include_credentials(self):
+    def test_native_network_status_uses_windows_without_wifi_management(self):
         source=(HERE/'xp-client'/'hermesxp.c').read_text()
-        self.assertIn('str_find(cl,"/wifi-scan")',source)
-        self.assertIn('write_wifi_scan_report()',source)
-        # Scanning reports SSIDs only, never key material.
-        a=source.index('static void write_wifi_scan_report(void)')
-        z=source.index('static int same_ssid(',a)
-        self.assertNotIn('g_wifi_password',source[a:z])
-        self.assertNotIn('g_ownerPw',source[a:z])
+        self.assertIn('static void refresh_network_status(void)',source)
+        self.assertIn('GetAdaptersInfo(NULL,&size)',source)
+        self.assertIn('"Network Connections..."',source)
+        self.assertIn('"Refresh status"',source)
+        self.assertIn('ShellExecuteA(owner,"open","control.exe","ncpa.cpl"',source)
+        self.assertIn('SetTimer(h,1,15000,NULL)',source)
+        self.assertIn('KillTimer(h,1)',source)
+        self.assertNotIn('wlanapi.dll',source)
+        self.assertNotIn('WlanSetProfile',source)
+        self.assertNotIn('WlanScan',source)
+        self.assertNotIn('"Scan Wi-Fi"',source)
+        self.assertNotIn('"Connect Wi-Fi"',source)
+        self.assertNotIn('"Wi-Fi passphrase',source)
+        self.assertNotIn('/wifi-scan',source)
+        for obsolete in ('wlan_api.h','wifi_profile.h'):
+            self.assertFalse((HERE/'xp-client'/obsolete).exists())
+
+    def test_network_ui_labels_are_bundled_in_xp_exe(self):
+        exe=(HERE/'dist'/'HermesXP.exe').read_bytes()
+        self.assertIn(b'Network Connections...',exe)
+        self.assertIn(b'Refresh status',exe)
+        self.assertIn(b'Network status:',exe)
+        self.assertNotIn(b'Scan Wi-Fi',exe)
+        self.assertNotIn(b'Connect Wi-Fi',exe)
 
 if __name__=='__main__':unittest.main()

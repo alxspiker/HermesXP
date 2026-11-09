@@ -17,9 +17,12 @@ files, creates Start menu and optional desktop shortcuts, and registers
   A fresh installation defaults to `Program Files\HermesXP`; an existing
   `C:\HermesXP` installation is upgraded **in place** to retain its settings.
   The installer never overwrites an existing `hermesxp.ini`.
-- Launch **Start → Programs → HermesXP → HermesXP**. The app has Wi-Fi
-  scanning/connection controls; **Install for MSN** is a separate button
-  inside the app that sets up Messenger and its local certificate.
+- Launch **Start → Programs → HermesXP → HermesXP**. The app displays the
+  IPv4 address assigned by Windows (updated automatically), with a
+  **Network Connections** button that opens XP's own networking control panel.
+  Connect to Wi-Fi or Ethernet using Windows XP before pairing. HermesXP does
+  not ask for, store, or manage Wi-Fi passwords. **Install for MSN** is a
+  separate button that configures Messenger and its local certificate.
 - Uninstall with **Add or Remove Programs**. This removes the companion and
   its shortcuts; it deliberately preserves `hermesxp.ini` and other user
   data. It does not undo the independent Messenger patch/CA installation.

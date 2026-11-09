@@ -19,15 +19,11 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define ES_AUTOHSCROLL 0x0080L
 #define ES_PASSWORD 0x0020L
 #define BS_DEFPUSHBUTTON 0x00000001L
-#define CBS_DROPDOWNLIST 0x0003L
-#define CB_ADDSTRING 0x0143
-#define CB_RESETCONTENT 0x014B
-#define CB_SETCURSEL 0x014E
-#define CB_GETCURSEL 0x0147
 #define CW_USEDEFAULT ((int)0x80000000)
 #define WM_CREATE 1
 #define WM_DESTROY 2
 #define WM_COMMAND 0x111
+#define WM_TIMER 0x113
 #define WM_CLOSE 16
 #define MB_OK 0
 #define MB_ICONINFORMATION 0x40
@@ -53,9 +49,6 @@ typedef struct { HWND hwnd; UINT message; WPARAM wParam; LPARAM lParam; DWORD ti
 typedef LRESULT (WINAPI *WNDPROC)(HWND,UINT,WPARAM,LPARAM);
 typedef struct { UINT style; WNDPROC lpfnWndProc; int cbClsExtra,cbWndExtra; HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor; HBRUSH hbrBackground; const char *lpszMenuName,*lpszClassName; } WNDCLASSA;
 typedef struct { short sin_family; unsigned short sin_port; unsigned long sin_addr; unsigned char sin_zero[8]; } SOCKADDR_IN;
-/* Windows XP WLAN API ABI subset is isolated here; dynamically load wlanapi.dll. */
-#include "wlan_api.h"
-#include "wifi_profile.h"
 #include "remote_control.h"
 /* Credential Manager (advapi32). CREDENTIALW is 48 bytes on 32-bit. */
 typedef struct { DWORD Flags; DWORD Type; unsigned short *TargetName; unsigned short *Comment; DWORD LastWrittenLow; DWORD LastWrittenHigh; DWORD CredentialBlobSize; unsigned char *CredentialBlob; DWORD Persist; DWORD AttributeCount; void *Attributes; unsigned short *TargetAlias; unsigned short *UserName; } CREDENTIALW;
@@ -82,6 +75,8 @@ IMPORT void WINAPI PostQuitMessage(int);
 IMPORT BOOL WINAPI DestroyWindow(HWND);
 IMPORT int WINAPI MessageBoxA(HWND,const char *,const char *,UINT);
 IMPORT int WINAPI GetWindowTextA(HWND,char *,int);
+IMPORT UINT WINAPI SetTimer(HWND,UINT,UINT,void *);
+IMPORT BOOL WINAPI KillTimer(HWND,UINT);
 IMPORT BOOL WINAPI SetWindowTextA(HWND,const char *);
 IMPORT LRESULT WINAPI SendMessageA(HWND,UINT,WPARAM,LPARAM);
 IMPORT BOOL WINAPI SetCursorPos(int,int);
@@ -187,198 +182,56 @@ IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
 #define SRCCOPY 0x00CC0020
 #define DIB_RGB_COLORS 0
 
-static HINSTANCE g_instance; static HWND g_host, g_status, g_wifi_list, g_wifi_password;
-static WLAN_HANDLE g_wlan_handle;
-static WLAN_GUID g_wifi_guid;
-static WLAN_DOT11_SSID g_wifi_ssids[32];
-static WLAN_DWORD g_wifi_auth[32], g_wifi_cipher[32];
-static int g_wifi_security[32];
-static int g_wifi_count;
+static HINSTANCE g_instance; static HWND g_host, g_status, g_network_status;
 static char g_remote_token[65], g_remote_allowed_ip[16];
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
-static void append_number(char *out,int *pos,unsigned int value);
+static void append_number(char *out,int *pos,unsigned int value){
+ char rev[10];int n=0;
+ do {rev[n++]=(char)('0'+value%10);value/=10;} while(value && n<10);
+ while(n>0)out[(*pos)++]=rev[--n];
+}
 static void update_status(const char *s){ SetWindowTextA(g_status,s); }
 static HWND add(const char *kind,const char *text,DWORD style,int x,int y,int w,int h,HWND parent,int id){
  return CreateWindowExA(0,kind,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,parent,(void*)id,g_instance,NULL);
 }
-typedef struct {
- PFN_WlanOpenHandle open;
- PFN_WlanEnumInterfaces interfaces;
- PFN_WlanScan scan;
- PFN_WlanGetAvailableNetworkList networks;
- PFN_WlanSetProfile set_profile;
- PFN_WlanConnect connect;
- PFN_WlanFreeMemory free_memory;
- PFN_WlanCloseHandle close_handle;
-} WLAN_API;
-static HINSTANCE g_wlan_module;
-static WLAN_API g_wlan_api;
-static void *wlan_proc(const char *name){ return GetProcAddress(g_wlan_module,name); }
-static int wlan_load(void){
- if(g_wlan_module) return 1;
- g_wlan_module=LoadLibraryA("wlanapi.dll");
- if(!g_wlan_module) return 0;
- g_wlan_api.open=(PFN_WlanOpenHandle)wlan_proc("WlanOpenHandle");
- g_wlan_api.interfaces=(PFN_WlanEnumInterfaces)wlan_proc("WlanEnumInterfaces");
- g_wlan_api.scan=(PFN_WlanScan)wlan_proc("WlanScan");
- g_wlan_api.networks=(PFN_WlanGetAvailableNetworkList)wlan_proc("WlanGetAvailableNetworkList");
- g_wlan_api.set_profile=(PFN_WlanSetProfile)wlan_proc("WlanSetProfile");
- g_wlan_api.connect=(PFN_WlanConnect)wlan_proc("WlanConnect");
- g_wlan_api.free_memory=(PFN_WlanFreeMemory)wlan_proc("WlanFreeMemory");
- g_wlan_api.close_handle=(PFN_WlanCloseHandle)wlan_proc("WlanCloseHandle");
- if(!g_wlan_api.open || !g_wlan_api.interfaces || !g_wlan_api.scan ||
-    !g_wlan_api.networks || !g_wlan_api.set_profile || !g_wlan_api.connect ||
-    !g_wlan_api.free_memory || !g_wlan_api.close_handle){
-  FreeLibrary(g_wlan_module); g_wlan_module=NULL; return 0;
- }
- return 1;
-}
-static void append_number(char *out,int *pos,unsigned int value){
- char rev[10]; int n=0;
- do { rev[n++]=(char)('0'+value%10); value/=10; } while(value && n<10);
- while(n>0) out[(*pos)++]=rev[--n];
-}
-static void scan_wifi(void){
- WLAN_HANDLE client=NULL; WLAN_DWORD version=0, rc; WLAN_INTERFACE_INFO_LIST *iflist=NULL;
- WLAN_AVAILABLE_NETWORK_LIST *netlist=NULL; WLAN_GUID selected; int have_interface=0;
- int i; char label[96];
- g_wifi_count=0;
- SendMessageA(g_wifi_list,CB_RESETCONTENT,0,0);
- if(!wlan_load()){ update_status("Wi-Fi API unavailable. Install the XP Wireless LAN API package."); return; }
- rc=g_wlan_api.open(HERMESXP_WLAN_API_MIN_VERSION,NULL,&version,&client);
- if(rc!=0){ update_status("Wi-Fi service unavailable or API could not open."); return; }
- rc=g_wlan_api.interfaces(client,NULL,&iflist);
- if(rc!=0 || !iflist || iflist->dwNumberOfItems==0){
-  if(iflist) g_wlan_api.free_memory(iflist);
-  g_wlan_api.close_handle(client,NULL);
-  update_status("No wireless interface managed by Windows Wireless Zero Configuration."); return;
- }
- for(i=0;i<(int)iflist->dwNumberOfItems && i<16;i++){
-  WLAN_INTERFACE_INFO *info=(WLAN_INTERFACE_INFO*)((BYTE*)iflist+8+i*sizeof(WLAN_INTERFACE_INFO));
-  if(info->isState!=wlan_interface_state_not_ready){ selected=info->InterfaceGuid; have_interface=1; break; }
- }
- g_wlan_api.free_memory(iflist);
- if(!have_interface){ g_wlan_api.close_handle(client,NULL); update_status("Wireless interface is not ready."); return; }
- rc=g_wlan_api.scan(client,&selected,NULL,NULL,NULL);
- if(rc!=0){ g_wlan_api.close_handle(client,NULL); update_status("Wi-Fi scan request failed."); return; }
- /* XP SP3 returns from WlanScan before the scan is complete and provides no
-    scan-complete notification; use a bounded delay before reading results. */
- update_status("Scanning nearby Wi-Fi networks...");
- Sleep(4000);
- rc=g_wlan_api.networks(client,&selected,HERMESXP_WLAN_LIST_FLAGS,NULL,&netlist);
- if(rc!=0 || !netlist){
-  g_wlan_api.close_handle(client,NULL);
-  update_status("Could not read nearby networks. Check the adapter and WZCSVC."); return;
- }
- for(i=0;i<(int)netlist->dwNumberOfItems && g_wifi_count<32;i++){
-  WLAN_AVAILABLE_NETWORK *net=(WLAN_AVAILABLE_NETWORK*)((BYTE*)netlist+8+i*sizeof(WLAN_AVAILABLE_NETWORK));
-  int j, printable=1, p=0;
-  if(!net->dot11Ssid.uSSIDLength || net->dot11Ssid.uSSIDLength>32) continue;
-  g_wifi_ssids[g_wifi_count]=net->dot11Ssid;
-  g_wifi_auth[g_wifi_count]=net->dot11DefaultAuthAlgorithm;
-  g_wifi_cipher[g_wifi_count]=net->dot11DefaultCipherAlgorithm;
-  g_wifi_security[g_wifi_count]=net->bSecurityEnabled;
-  for(j=0;j<(int)net->dot11Ssid.uSSIDLength;j++){
-   BYTE c=net->dot11Ssid.ucSSID[j]; if(c<32 || c>126) printable=0;
-  }
-  if(printable){
-   for(j=0;j<(int)net->dot11Ssid.uSSIDLength && p<60;j++) label[p++]=(char)net->dot11Ssid.ucSSID[j];
-  } else {
-   const char *pre="SSID 0x"; while(*pre && p<60) label[p++]=*pre++;
-   for(j=0;j<(int)net->dot11Ssid.uSSIDLength && p<60;j++){
-    static const char hex[]="0123456789ABCDEF"; BYTE c=net->dot11Ssid.ucSSID[j];
-    label[p++]=hex[c>>4]; label[p++]=hex[c&15];
+/* Read an assigned IPv4 address from XP. This is connection status only:
+   no WLAN scanning, password storage, or network configuration of any kind. */
+static void refresh_network_status(void){
+ DWORD size=0; void *buf=NULL;
+ const char *ip=NULL; char line[110]; int pos=0,i;
+ const char *prefix="Network: IPv4 ";
+ if(!g_network_status) return;
+ GetAdaptersInfo(NULL,&size);
+ if(size>=sizeof(IP_ADAPTER_INFO) && size<=65536){
+  buf=HeapAlloc(GetProcessHeap(),0,size);
+  if(buf){
+   if(GetAdaptersInfo(buf,&size)==0){
+    IP_ADAPTER_INFO *adapter=(IP_ADAPTER_INFO*)buf;
+    while(adapter){
+     const char *addr=adapter->IpAddressList.IpAddress;
+     if(addr[0] && !(addr[0]=='0' && addr[1]=='.') &&
+        !(addr[0]=='1' && addr[1]=='2' && addr[2]=='7' && addr[3]=='.') &&
+        !(addr[0]=='1' && addr[1]=='6' && addr[2]=='9' && addr[3]=='.')){
+      ip=addr;break;
+     }
+     adapter=adapter->Next;
+    }
+    if(ip){
+     for(i=0;prefix[i] && pos<90;i++)line[pos++]=prefix[i];
+     for(i=0;ip[i] && pos<105;i++)line[pos++]=ip[i];
+     line[pos]=0;SetWindowTextA(g_network_status,line);
+    }
    }
+   HeapFree(GetProcessHeap(),0,buf);
   }
-  label[p++]=' '; label[p++]='('; append_number(label,&p,net->wlanSignalQuality); label[p++]='%'; label[p++]=')';
-  label[p++]=' '; label[p++]='[';
-  { const char *sec=net->bSecurityEnabled?"secured]":"open]"; while(*sec && p<90) label[p++]=*sec++; }
-  label[p]=0;
-  SendMessageA(g_wifi_list,CB_ADDSTRING,0,(LPARAM)label);
-  g_wifi_count++;
  }
- g_wlan_api.free_memory(netlist);
- g_wlan_api.close_handle(client,NULL);
- if(!g_wifi_count){ update_status("No visible Wi-Fi networks found."); return; }
- g_wifi_guid=selected;
- SendMessageA(g_wifi_list,CB_SETCURSEL,0,0);
- update_status("Choose a Wi-Fi network, enter its password and click Connect Wi-Fi.");
+ if(!ip) SetWindowTextA(g_network_status,"Network: no assigned IPv4 address");
 }
-/* Headless Wi-Fi scan diagnostic for an XP shell or agent. No passwords. */
-static void write_wifi_scan_report(void){
- HANDLE f=CreateFileA("C:\\HermesXP\\wifi-scan.txt",GENERIC_WRITE,FILE_SHARE_READ,NULL,2,0,NULL);
- if(f!=(HANDLE)-1){
-  DWORD n; int i; char line[180];
-  GetWindowTextA(g_status,line,sizeof(line));
-  WriteFile(f,line,(DWORD)strlen0(line),&n,NULL);
-  WriteFile(f,"\r\n",2,&n,NULL);
-  for(i=0;i<g_wifi_count && i<32;i++){
-   line[0]=0;
-   SendMessageA(g_wifi_list,0x0148,(WPARAM)i,(LPARAM)line); /* CB_GETLBTEXT */
-   WriteFile(f,line,(DWORD)strlen0(line),&n,NULL);
-   WriteFile(f,"\r\n",2,&n,NULL);
-  }
-  CloseHandle(f);
+static void open_windows_network_connections(HWND owner){
+ /* XP's built-in Network Connections control-panel applet. */
+ if((DWORD)ShellExecuteA(owner,"open","control.exe","ncpa.cpl",NULL,1)<=32){
+  update_status("Could not open Network Connections. Use Control Panel instead.");
  }
-}
-static int same_ssid(const WLAN_DOT11_SSID *a,const WLAN_DOT11_SSID *b){
- int i; if(a->uSSIDLength!=b->uSSIDLength) return 0;
- for(i=0;i<(int)a->uSSIDLength;i++) if(a->ucSSID[i]!=b->ucSSID[i]) return 0;
- return 1;
-}
-static void wipe_secret(char *p,int size){ int i; for(i=0;i<size;i++)p[i]=0; }
-static void wipe_xml(WLAN_WCHAR *p,int size){ int i; for(i=0;i<size;i++)p[i]=0; }
-static void connect_wifi(HWND owner){
- int index=(int)SendMessageA(g_wifi_list,0x0147,0,0),i,connected=0;
- char pass[100]; WLAN_WCHAR profile[80],xml[2048]; WLAN_HANDLE client=NULL;
- WLAN_DWORD version=0,rc,reason=0; WLAN_AVAILABLE_NETWORK_LIST *netlist=NULL;
- WLAN_CONNECTION_PARAMETERS cp;
- if(index<0 || index>=g_wifi_count){ update_status("Scan and select a Wi-Fi network first."); return; }
- pass[0]=0;
- if(g_wifi_security[index]){
-  GetWindowTextA(g_wifi_password,pass,sizeof(pass));
-  i=strlen0(pass);
-  if(i<8 || i>63){ wipe_secret(pass,sizeof(pass)); update_status("WPA/WPA2 passphrases must be 8 to 63 ASCII characters."); return; }
-  for(i=0;pass[i];i++) if((unsigned char)pass[i]<32 || (unsigned char)pass[i]>126){
-   int j; for(j=0;j<(int)sizeof(pass);j++)pass[j]=0; update_status("Use printable ASCII characters for this Wi-Fi passphrase."); return;
-  }
-  if(MessageBoxA(owner,"Windows XP stores this Wi-Fi key in its saved profile; XP WLAN profiles may not encrypt it at rest. Continue?","Wi-Fi key storage warning",MB_YESNO|MB_ICONWARNING)!=IDYES){
-   wipe_secret(pass,sizeof(pass)); update_status("Wi-Fi connection cancelled."); return;
-  }
- }
- if(!hermesxp_build_wifi_profile(&g_wifi_ssids[index],g_wifi_security[index],g_wifi_auth[index],g_wifi_cipher[index],pass,profile,80,xml,2048)){
-  wipe_secret(pass,sizeof(pass)); wipe_xml(xml,sizeof(xml)/sizeof(xml[0]));
-  update_status("Unsupported SSID or security mode; use printable ASCII SSIDs on open or WPA/WPA2-Personal Wi-Fi."); return;
- }
- SetWindowTextA(g_wifi_password,"");
- if(!wlan_load() || g_wlan_api.open(HERMESXP_WLAN_API_MIN_VERSION,NULL,&version,&client)!=0){
-  wipe_secret(pass,sizeof(pass)); wipe_xml(xml,sizeof(xml)/sizeof(xml[0])); update_status("Wi-Fi service unavailable."); return;
- }
- rc=g_wlan_api.set_profile(client,&g_wifi_guid,HERMESXP_WLAN_PROFILE_FLAGS,xml,NULL,1,NULL,&reason);
- wipe_xml(xml,sizeof(xml)/sizeof(xml[0]));
- if(rc!=0){
-  g_wlan_api.close_handle(client,NULL); wipe_secret(pass,sizeof(pass));
-  update_status("Could not save Wi-Fi profile (check permissions and adapter compatibility)."); return;
- }
- cp.wlanConnectionMode=HERMESXP_WLAN_PROFILE_CONNECTION_MODE; cp.strProfile=profile;
- cp.pDot11Ssid=NULL; cp.dot11BssType=HERMESXP_WLAN_BSS_INFRASTRUCTURE; cp.dwFlags=0;
- rc=g_wlan_api.connect(client,&g_wifi_guid,&cp,NULL);
- wipe_secret(pass,sizeof(pass));
- if(rc!=0){ g_wlan_api.close_handle(client,NULL); update_status("Wi-Fi connect request failed."); return; }
- update_status("Connecting to selected Wi-Fi network...");
- for(i=0;i<20 && !connected;i++){
-  Sleep(1000); netlist=NULL;
-  if(g_wlan_api.networks(client,&g_wifi_guid,HERMESXP_WLAN_LIST_FLAGS,NULL,&netlist)==0 && netlist){
-   int j; for(j=0;j<(int)netlist->dwNumberOfItems;j++){
-    WLAN_AVAILABLE_NETWORK *net=(WLAN_AVAILABLE_NETWORK*)((BYTE*)netlist+8+j*sizeof(WLAN_AVAILABLE_NETWORK));
-    if((net->dwFlags&HERMESXP_WLAN_CONNECTED) && same_ssid(&net->dot11Ssid,&g_wifi_ssids[index])){ connected=1; break; }
-   }
-   g_wlan_api.free_memory(netlist);
-  }
- }
- g_wlan_api.close_handle(client,NULL);
- if(connected) update_status("Connected to selected Wi-Fi network.");
- else update_status("Connection was requested but not confirmed. Check password, signal, and adapter compatibility.");
 }
 static void probe(HWND owner){
  char host[100], response[96], machine[80], request[180]; DWORD n=sizeof(machine);
@@ -1151,12 +1004,13 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
    ownerLine[j]=0;
    add("STATIC",ownerLine,0,246,122,144,20,h,108);
   }
-  add("STATIC","Wi-Fi networks:",0,18,154,210,20,h,110);
-  add("BUTTON","Scan Wi-Fi",WS_TABSTOP,246,150,144,26,h,111);
-  g_wifi_list=add("COMBOBOX","",CBS_DROPDOWNLIST|WS_TABSTOP,18,180,372,90,h,112);
-  add("STATIC","Wi-Fi passphrase (saved in XP profile):",0,18,211,250,20,h,113);
-  g_wifi_password=add("EDIT","",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL|ES_PASSWORD,18,234,240,25,h,114);
-  add("BUTTON","Connect Wi-Fi",WS_TABSTOP|BS_DEFPUSHBUTTON,270,234,120,26,h,115);
+  add("STATIC","Network status:",0,18,154,210,20,h,110);
+  g_network_status=add("STATIC","Checking Windows network status...",0,18,179,372,22,h,112);
+  add("STATIC","Connect to Wi-Fi or Ethernet using Windows XP.",0,18,207,374,20,h,113);
+  add("BUTTON","Network Connections...",WS_TABSTOP,18,235,214,27,h,111);
+  add("BUTTON","Refresh status",WS_TABSTOP,246,235,144,27,h,115);
+  refresh_network_status();
+  SetTimer(h,1,15000,NULL);
   g_status=add("STATIC","Ready. Test only: remote controls are disabled.",0,18,270,383,24,h,104);
   if(!g_remote_token[0] || !g_remote_allowed_ip[0]) update_status("Remote UI locked; configure [Remote] Token and AllowedHostIP.");
   add("STATIC","Install places the CA, Switcher files and settings for Messenger.",0,18,302,386,24,h,105);
@@ -1170,10 +1024,11 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
   else update_status("Screenshot failed.");
   return 0;
  }
- if(msg==WM_COMMAND && (w&0xFFFF)==111){scan_wifi();return 0;}
- if(msg==WM_COMMAND && (w&0xFFFF)==115){connect_wifi(h);return 0;}
+ if(msg==WM_COMMAND && (w&0xFFFF)==111){open_windows_network_connections(h);return 0;}
+ if(msg==WM_COMMAND && (w&0xFFFF)==115){refresh_network_status();return 0;}
+ if(msg==WM_TIMER && w==1){refresh_network_status();return 0;}
  if(msg==WM_CLOSE){DestroyWindow(h);return 0;}
- if(msg==WM_DESTROY){PostQuitMessage(0);return 0;}
+ if(msg==WM_DESTROY){KillTimer(h,1);PostQuitMessage(0);return 0;}
  return DefWindowProcA(h,msg,w,l);
 }
 static void load_remote_config(void){
@@ -1201,11 +1056,6 @@ void WINAPI WinMainCRTStartup(void){
  /* Background authenticated screenshot and narrow UI-action listener. */
  CreateThread(NULL,0,screenshot_server,NULL,0,&tid);
  ShowWindow(h,5);UpdateWindow(h);
- { const char *cl=GetCommandLineA();
-   if(cl && str_find(cl,"/wifi-scan")){
-     scan_wifi();write_wifi_scan_report();DestroyWindow(h);ExitProcess(0);
-   }
- }
  while(GetMessageA(&msg,NULL,0,0)>0){TranslateMessage(&msg);DispatchMessageA(&msg);}
  ExitProcess((UINT)msg.wParam);
 }

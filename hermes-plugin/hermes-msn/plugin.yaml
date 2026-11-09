@@ -1,8 +1,8 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.6.2
-description: "Native Windows Live Messenger calling via Hermes Talk, with jitter-buffered RTP, clocked PCM, acoustic echo suppression and diagnostics."
+version: 0.6.3
+description: "Native Windows Live Messenger calls through Hermes Talk, optional foreground Hermes tool execution, jitter-resistant RTP, and live diagnostics."
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process
@@ -22,6 +22,9 @@ optional_env:
     password: false
   - name: HERMES_XP_TALK_TARGET
     description: Optional authorized Hermes Talk task target (required for GPT-Live mode). Configure on the host in private msn-bridge.env.
+    password: false
+  - name: HERMES_XP_TALK_DIRECT_TOOLS
+    description: Set to 1 to let native MSN voice use a foreground Hermes CLI action with host tool/approval permissions. Requires explicitly trusted private paired XP and Talk fork v0.22.3+. Mutually exclusive with HERMES_XP_TALK_TARGET.
     password: false
   - name: HERMES_XP_TALK_PEER
     description: Optional Talk task peer for target selection (default local)

@@ -1,6 +1,6 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
-### Native Messenger calls (v0.6.2)
+### Native Messenger calls (v0.6.3)
 
 Windows Live Messenger 2009 owns the native call UI, microphone and speakers.
 HermesXP runs **no ASR, TTS, voice LLM, or voice provider logic**. A paired XP
@@ -96,6 +96,44 @@ microphone RTP is ignored. At hangup the host logs input packet loss,
 timer slips and output underflows as a concise, content-free diagnostic,
 so a future real-call problem can be measured rather than guessed.
 Provider behavior and response creation remain owned by Hermes Talk.
+
+**Direct foreground Hermes tools (v0.6.3):** The previous Talk session
+exposed only Talk's limited tool list, including background `delegate_task`.
+To execute requested actions from the Messenger voice call without the
+delegation conversation, opt in on the Hermes host in private
+`~/.hermes/msn-bridge.env`:
+
+```ini
+HERMES_XP_TALK_DIRECT_TOOLS=1
+```
+
+This requires the matching `hermes-talk-custom` fork v0.22.3+, whose
+explicitly scoped classification permits the authenticated HermesXP
+`hermes_execute` foreground tool while refusing unknown voice tools on
+every other surface. HermesXP advertises two voice tools: `hermes_execute`
+and `get_current_time`. The first runs the locally installed `hermes -z`
+using the **CLI's existing tools/models and approval policy**, waits for
+the reply and speaks it through Talk. This is a foreground **new Hermes CLI
+turn**, not a background delegation, not the existing MSN text session,
+and not an unbounded realtime direct gateway attachment. It can take longer
+than ordinary conversation; one command has a 3-minute limit and hanging up
+terminates a running command. Do not mistake a tool admission for successful
+execution; Hermes' result must report what actually happened.
+
+**Security:** Voice is not a speaker biometric. Only enable this on a
+physically trusted paired XP computer with a private network, because
+anyone who can speak into its microphone during your MSN call may request
+actions carrying the CLI account's configured permissions. No CLI token
+or Hermes provider credential is transferred to XP. The tool is never
+advertised to Discord or other Talk surfaces.
+
+**Persistent native MSN audio diagnostics (v0.6.3):** RTP waits for a
+400ms startup speech buffer, but short underruns within a speech burst
+do **not** restart that full wait. It logs content-free packet-loss,
+audio-underflow, clock-skip and buffer statistics every 12 seconds while
+an MSN call is active, including when Windows Live Messenger omits SIP BYE.
+These measurements help distinguish network/scheduler gaps from the XP
+decoder or sound card.
 
 To diagnose:
 

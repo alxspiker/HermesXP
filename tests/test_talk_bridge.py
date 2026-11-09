@@ -8,7 +8,8 @@ import time
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+import subprocess
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import talk_bridge as bridge
@@ -140,12 +141,20 @@ class TalkBridgeTests(unittest.TestCase):
         try:
             with patch.dict(sys.modules, {
                 "hermes_plugins": package, "hermes_plugins.hermes_talk": fake,
-            }), patch.dict(os.environ, {"TALK_VOICE_MODE": "native"}, clear=False):
+            }), patch.dict(os.environ, {
+                "TALK_VOICE_MODE": "native",
+                "HERMES_XP_TALK_DIRECT_TOOLS": "1",
+            }, clear=False):
                 os.environ.pop("HERMES_XP_TALK_TARGET", None)
                 self.assertEqual(asyncio.run(bridge.run_call(a)), 0)
             self.assertEqual(captured["lane"], "cli")
             self.assertEqual(captured["keyboard_control"], False)
             self.assertNotIn("native_task", captured)
+            self.assertIn("host_execution_attachment", captured)
+            self.assertEqual(
+                {tool["name"] for tool in captured["host_execution_attachment"].tool_definitions()},
+                {"hermes_execute", "get_current_time"},
+            )
         finally:
             a.close()
             b.close()
@@ -162,6 +171,74 @@ class TalkBridgeTests(unittest.TestCase):
             }), patch.dict(os.environ, {"TALK_VOICE_MODE": "live"}, clear=False):
                 os.environ.pop("HERMES_XP_TALK_TARGET", None)
                 with self.assertRaisesRegex(RuntimeError, "HERMES_XP_TALK_TARGET"):
+                    asyncio.run(bridge.run_call(a))
+        finally:
+            a.close()
+            b.close()
+
+    def test_voice_tool_invokes_hermes_directly_no_shell_or_delegation(self):
+        tool = bridge.HermesVoiceExecution()
+        definitions = tool.tool_definitions()
+        self.assertNotIn("delegate_task", {item["name"] for item in definitions})
+        permit = tool.mint_tool_call_permit(
+            tool_name="hermes_execute", call_id="voice-1",
+            arguments={"request": "List the active shell tools"},
+        )
+        process = MagicMock()
+        process.communicate.return_value = ("The tools are available.", "")
+        process.returncode = 0
+        with patch.object(bridge.shutil, "which", return_value="/bin/true"), patch.object(
+            bridge.subprocess, "Popen", return_value=process,
+        ) as spawn:
+            result = asyncio.run(tool.execute_tool_batch((permit,)))
+        self.assertEqual(result[0]["call_id"], "voice-1")
+        self.assertEqual(result[0]["output"], "The tools are available.")
+        args, kwargs = spawn.call_args
+        self.assertEqual(args[0][0], "/bin/true")
+        self.assertEqual(args[0][1], "-z")
+        self.assertIn("List the active shell tools", args[0][2])
+        self.assertEqual(kwargs["shell"], False)
+        self.assertTrue(kwargs["start_new_session"])
+        process.communicate.assert_called_once_with(timeout=bridge.HERMES_TOOL_TIMEOUT)
+        with self.assertRaisesRegex(ValueError, "invalid"):
+            asyncio.run(tool.execute_tool_batch((permit,)))
+        tool.close()
+        with self.assertRaisesRegex(ValueError, "not authorized"):
+            tool.mint_tool_call_permit(tool_name="hermes_execute", call_id="voice-2",
+                                       arguments={"request": "test"})
+
+    def test_voice_tool_rejects_bad_commands_and_excessive_calls(self):
+        tool = bridge.HermesVoiceExecution()
+        with patch.object(bridge.shutil, "which", return_value="/bin/true"):
+            with patch.object(bridge.subprocess, "Popen") as spawn:
+                self.assertIn("too long", tool._run_hermes("x" * (bridge.MAX_TOOL_PROMPT + 1)))
+                self.assertIn("concrete request", tool._run_hermes(""))
+                spawn.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "not authorized"):
+            tool.mint_tool_call_permit(tool_name="delegate_task", call_id="call-1",
+                                       arguments={"task": "fake"})
+        for i in range(bridge.MAX_TOOL_CALLS):
+            tool.mint_tool_call_permit(tool_name="hermes_execute", call_id=f"id-{i}",
+                                       arguments={"request": "test"})
+        with self.assertRaisesRegex(ValueError, "limit"):
+            tool.mint_tool_call_permit(tool_name="hermes_execute", call_id="one-more",
+                                       arguments={"request": "test"})
+
+    def test_no_direct_tools_or_task_refuses_limited_legacy_session(self):
+        a, b = socket.socketpair()
+        fake = types.ModuleType("hermes_plugins.hermes_talk")
+        fake.talk_cli = types.SimpleNamespace(
+            run_talk_session=lambda **kwargs: self.fail("Limited session started"))
+        package = types.ModuleType("hermes_plugins")
+        package.__path__ = []
+        try:
+            with patch.dict(sys.modules, {
+                "hermes_plugins": package, "hermes_plugins.hermes_talk": fake,
+            }), patch.dict(os.environ, {
+                "TALK_VOICE_MODE": "native", "HERMES_XP_TALK_DIRECT_TOOLS": "0",
+            }, clear=False):
+                os.environ.pop("HERMES_XP_TALK_TARGET", None)
+                with self.assertRaisesRegex(RuntimeError, "authorized Talk task or direct"):
                     asyncio.run(bridge.run_call(a))
         finally:
             a.close()

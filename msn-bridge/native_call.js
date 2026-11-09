@@ -25,10 +25,11 @@ const TALK_MAX_PENDING = 256 * 1024;
 const RTP_PACKET_MS = 20;
 const RTP_SAMPLES_PER_PACKET = 160;
 const RTP_PREROLL_PACKETS = 4;
-// The Talk bridge and RTP sender have independent clocks. Wait for a full
-// 160ms of PCM before starting each speech burst so minor scheduling jitter
-// does not turn into alternating speech/silence on WLM's old G.711 decoder.
-const RTP_SPEECH_START_BYTES = 8 * RTP_SAMPLES_PER_PACKET;
+// The host's Talk transport and Messenger RTP have independent clocks.
+// 400ms of preroll absorbs intermittent provider/OS thread scheduling while
+// keeping the voice path interactive. Short replies still flush via the
+// existing 250ms stale-tail rule.
+const RTP_SPEECH_START_BYTES = 20 * RTP_SAMPLES_PER_PACKET;
 const RTP_MAX_CATCHUP_MS = 30;
 
 function parseSip(data) {
@@ -222,15 +223,23 @@ class NativeCall {
     this.call = null; // suppress reentrant callbacks from closing the socket
     if (old?.expiry) clearTimeout(old.expiry);
     if (old?.audioTimer) clearInterval(old.audioTimer);
+    if (old?.statsTimer) clearInterval(old.statsTimer);
     if (old?.talk) {
-      this.logger.info('Messenger RTP audio stats: rx=%d lost=%d talk_pcm=%dms played=%dms underflows=%d timer_slips=%d max_buffer=%dms',
-        old.incomingFrames || 0, old.incomingLost || 0, old.outReceivedMs || 0,
-        old.outPlayedMs || 0, old.outputUnderflows || 0,
-        old.timerSlips || 0, old.maxBufferedMs || 0);
+      this.logCallStats(old, 'final');
     }
     if (old?.talk) old.talk.destroy();
     if (this.rendezvousTimer) clearTimeout(this.rendezvousTimer);
     this.rendezvousTimer = null;
+  }
+  logCallStats(call, kind = 'periodic') {
+    this.logger.info(
+      'Messenger RTP %s: incoming=%d missing=%d talk_pcm=%dms played=%dms ' +
+      'underflows=%d clock_skips=%d queued=%dms peak_buffer=%dms interruptions=%d',
+      kind, call.incomingFrames || 0, call.incomingLost || 0,
+      Math.round(call.outReceivedMs || 0), Math.round(call.outPlayedMs || 0),
+      call.outputUnderflows || 0, call.timerSlips || 0,
+      Math.round((call.output?.length || 0) / 8),
+      call.maxBufferedMs || 0, call.interruptions || 0);
   }
   sendSignal(type, payload) {
     this.client.sendNativeSignal(this.owner, type, payload);
@@ -473,7 +482,15 @@ class NativeCall {
     call.outReceivedMs = 0;
     call.outPlayedMs = 0;
     call.maxBufferedMs = 0;
+    call.interruptions = 0;
     call.audioTimer = setInterval(() => this.tickTalkAudio(call), 10);
+    // WLM 2009 does not always deliver SIP BYE when its call window closes.
+    // Periodic content-free stats remain available even if the call outlives
+    // its GUI. No microphone PCM or transcript content is logged.
+    call.statsTimer = setInterval(() => {
+      if (this.call === call && call.rtpSeen)
+        this.logCallStats(call);
+    }, 12000);
     const connection = net.connect({host: '127.0.0.1', port: TALK_BRIDGE_PORT});
     call.talk = connection;
     connection.on('connect', () => {
@@ -511,6 +528,7 @@ class NativeCall {
         this.logger.info('Hermes Talk PCM bridge ready');
       } else if (type === 'D') {
         // Hermes Talk owns interruption/truncation decisions.
+        call.interruptions = (call.interruptions || 0) + 1;
         call.output = Buffer.alloc(0);
         call.talkRemainder = Buffer.alloc(0);
         call.outSpeaking = false;
@@ -583,7 +601,12 @@ class NativeCall {
       out = Buffer.alloc(160, 0xff);
       if (call.outSpeaking) {
         call.outputUnderflows = (call.outputUnderflows || 0) + 1;
-        call.outSpeaking = false;
+        // A 20-100ms provider/OS gap is not the end of an utterance. If we
+        // reset on each missing frame, the new 400ms jitter-buffer preroll
+        // is paid REPEATEDLY mid-sentence: this is audible as chopped words.
+        // Stay in the speech phase across short gaps; do not invent samples.
+        if (!call.lastOutputAt || now - call.lastOutputAt > 550)
+          call.outSpeaking = false;
       }
     }
     const packet = encodeRtp(out, call.seq++, call.stamp, call.ssrc, marker);

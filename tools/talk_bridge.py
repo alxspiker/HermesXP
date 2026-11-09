@@ -19,8 +19,11 @@ import logging
 import math
 import os
 import queue
+import shutil
+import signal
 import socket
 import struct
+import subprocess
 import threading
 import time
 from array import array
@@ -36,6 +39,205 @@ PCM_BYTES_PER_SECOND = SAMPLE_RATE * 2
 FRAME_BYTES = 960  # 20 ms of 24 kHz mono PCM16; maps to one PCMU/8000 RTP packet
 MAX_PLAYBACK_BYTES = PCM_BYTES_PER_SECOND * 20
 PLAYBACK_PREROLL_FRAMES = 4
+MAX_TOOL_PROMPT = 4000
+MAX_TOOL_OUTPUT = 5000
+MAX_TOOL_CALLS = 12
+HERMES_TOOL_TIMEOUT = 180
+
+
+class HermesVoiceExecution:
+    """HermesXP-only foreground Hermes action, not Talk's delegation agent.
+
+    This is NOT a forged Hermes gateway capability. It uses the same local
+    Hermes CLI that an authorized operator can run at the server, with no
+    shell expansion, and remains subject to that CLI's configured tool
+    availability, credentials, and approval policy. The MSN peer is verified
+    by the paired native SIP call and the loopback token prior to creation.
+    """
+
+    def __init__(self):
+        # Only this explicitly enabled, authenticated HermesXP transport
+        # may advertise its foreground Hermes action as a host attachment.
+        # Talk's ordinary unknown-host-tool deny policy stays unchanged.
+        self.hermesxp_authenticated_voice_action = True
+        self.closed = False
+        self.calls = 0
+        self._issued = {}
+        self._lock = threading.Lock()
+        self._process_lock = threading.Lock()
+        self._run_lock = threading.Lock()
+        self._process = None
+
+    def tool_definitions(self):
+        return (
+            {
+                "name": "hermes_execute",
+                "description": (
+                    "Execute the user's request immediately with the Hermes "
+                    "agent and its real configured tools, and return the "
+                    "result for speech. Do NOT explain delegation or suggest "
+                    "switching agents. Use this for terminal, file, browser, "
+                    "screen and other real actions. The host owns its normal "
+                    "approval and tool permissions; report refusals accurately."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "request": {"type": "string", "description":
+                                    "The user's concrete action or information request."}
+                    },
+                    "required": ["request"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "get_current_time",
+                "description": "Read the current host clock or an IANA timezone directly, without delegating.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "timezone": {"type": "string", "description":
+                                     "Optional IANA timezone such as America/Edmonton."}
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        )
+
+    def mint_tool_call_permit(self, **kwargs):
+        name = kwargs.get("tool_name")
+        args = kwargs.get("arguments")
+        call_id = kwargs.get("call_id")
+        if self.closed or name not in {"hermes_execute", "get_current_time"}:
+            raise ValueError("HermesXP voice tool not authorized")
+        if not isinstance(call_id, str) or not call_id or not isinstance(args, dict):
+            raise ValueError("invalid HermesXP tool call")
+        with self._lock:
+            if self.calls >= MAX_TOOL_CALLS:
+                raise ValueError("HermesXP voice command limit reached")
+            self.calls += 1
+            permit = object()
+            self._issued[id(permit)] = (permit, call_id, name, dict(args))
+            return permit
+
+    async def execute_tool_batch(self, permits):
+        from asyncio import to_thread
+        results = []
+        for permit in permits:
+            with self._lock:
+                issued = self._issued.pop(id(permit), None)
+            if issued is None or issued[0] is not permit or self.closed:
+                raise ValueError("Expired or invalid HermesXP voice permit")
+            _, call_id, name, args = issued
+            if name == "get_current_time":
+                from hermes_plugins.hermes_talk import talk_tools
+                output = talk_tools.execute_talk_tool(name, args)
+            else:
+                output = await to_thread(self._run_hermes, args.get("request"))
+            results.append({"call_id": call_id, "output": output[:MAX_TOOL_OUTPUT],
+                            "receipt_id": f"hermesxp-{self.calls}-{call_id}"})
+        return tuple(results)
+
+    def _run_hermes(self, request):
+        if not isinstance(request, str) or not request.strip():
+            return "Hermes needs a concrete request."
+        if len(request) > MAX_TOOL_PROMPT:
+            return "That request is too long for one voice action. Please shorten it."
+        executable = (
+            os.environ.get("HERMES_XP_TALK_HERMES_BINARY")
+            or shutil.which("hermes")
+            or str(os.path.expanduser("~/.local/bin/hermes"))
+        )
+        if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+            return "Hermes command is not installed on the server."
+        context = (
+            "You are Hermes acting on the operator's request made through "
+            "HermesXP Windows Live Messenger on the paired Windows XP machine. "
+            "Perform the action yourself using your available configured tools. "
+            "Do not delegate or launch a subagent. Do not claim an action "
+            "succeeded unless verified. Report results or refusals in 1-3 "
+            "short sentences suitable for speech. For computer control "
+            "requests about XP, target the paired Windows XP computer, not "
+            "the Hermes server.\n\nOperator request: " + request.strip()
+        )
+        with self._run_lock:
+            if self.closed:
+                return "The HermesXP call ended before the command started."
+            try:
+                process = subprocess.Popen(
+                    [executable, "-z", context], shell=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, cwd=os.path.expanduser("~"),
+                    start_new_session=True,
+                )
+            except (OSError, ValueError) as exc:
+                LOG.warning("HermesXP voice command could not start (%s)", type(exc).__name__)
+                return "The Hermes agent could not start this action."
+            with self._process_lock:
+                self._process = process
+                cancelled = self.closed
+            if cancelled:
+                self._terminate(process)
+            try:
+                stdout, _stderr = process.communicate(timeout=HERMES_TOOL_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self._terminate(process)
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self._kill(process)
+                    process.communicate()
+                return "Hermes did not finish that action before the three-minute limit."
+            except OSError:
+                self._terminate(process)
+                return "The Hermes agent was interrupted."
+            finally:
+                with self._process_lock:
+                    if self._process is process:
+                        self._process = None
+        if self.closed:
+            return "The HermesXP call ended before Hermes finished."
+        body = (stdout or "").strip()
+        if process.returncode != 0:
+            # stderr often contains credentials or sensitive host details;
+            # do not feed it back into the voice model.
+            LOG.warning("HermesXP voice command failed (status=%s)", process.returncode)
+            return ("Hermes returned an error executing that action. " +
+                    (body[-1500:] if body else "No result was available."))
+        return body[-MAX_TOOL_OUTPUT:] or "Hermes finished without returning any result."
+
+    @staticmethod
+    def _terminate(process):
+        try:
+            if process.poll() is not None:
+                return
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGTERM)
+            else:
+                process.terminate()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    @staticmethod
+    def _kill(process):
+        try:
+            if process.poll() is not None:
+                return
+            if hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    def close(self):
+        self.closed = True
+        with self._lock:
+            self._issued.clear()
+        with self._process_lock:
+            process = self._process
+        if process is not None:
+            self._terminate(process)
 
 
 def rms(pcm: bytes) -> float:
@@ -343,12 +545,25 @@ async def run_call(connection: socket.socket):
         }
     elif os.environ.get("TALK_VOICE_MODE", "").strip().lower() == "live":
         raise RuntimeError("Hermes Talk Live requires HERMES_XP_TALK_TARGET")
+    direct = os.environ.get("HERMES_XP_TALK_DIRECT_TOOLS", "").strip() == "1"
+    if task and direct:
+        raise RuntimeError(
+            "Choose either HERMES_XP_TALK_TARGET or HERMES_XP_TALK_DIRECT_TOOLS"
+        )
+    attachment = HermesVoiceExecution() if direct else None
+    if not task and attachment is None:
+        raise RuntimeError(
+            "HermesXP voice must use an authorized Talk task or direct Hermes tools"
+        )
     try:
         return await talk_cli.run_talk_session(
             audio=audio, lane="cli", keyboard_control=False,
+            **({"host_execution_attachment": attachment} if attachment else {}),
             **({"native_task": task} if task else {}),
         )
     finally:
+        if attachment is not None:
+            attachment.close()
         audio.stop()
 
 

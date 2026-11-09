@@ -22,6 +22,19 @@ REV_FILE="$HERMES_HOME/msn-server/.xp-active-plugin-revision"
 CURRENT="$(cat "$REV_FILE" 2>/dev/null || true)"
 if [ "$REVISION" != "$CURRENT" ]; then
   echo "[update-xp] plugin changed ($CURRENT -> $REVISION)"
+  # The live Node bridge runs from ~/.hermes/msn-bridge, not the plugin
+  # checkout. Sync the bridge entrypoint BEFORE restarting its service.
+  # Never copy tokens, local account settings or node_modules from GitHub.
+  BRIDGE_LIVE="$HERMES_HOME/msn-bridge/bridge.js"
+  if [ -d "$HERMES_HOME/msn-bridge" ] && [ -f "$REPO/msn-bridge/bridge.js" ]; then
+    cp "$REPO/msn-bridge/bridge.js" "$BRIDGE_LIVE.tmp"
+    chmod 644 "$BRIDGE_LIVE.tmp"
+    mv -f "$BRIDGE_LIVE.tmp" "$BRIDGE_LIVE"
+    echo "[update-xp] updated local MSN bridge code"
+  else
+    echo "[update-xp] ERROR: local bridge install missing; run local-server/install.sh"
+    exit 1
+  fi
   systemctl --user try-restart hermes-gateway.service || true
   systemctl --user try-restart hermes-msn-bridge.service || true
   printf '%s\n' "$REVISION" > "$REV_FILE.tmp"

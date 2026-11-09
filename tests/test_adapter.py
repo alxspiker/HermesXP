@@ -98,4 +98,17 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['text'],'Hello from Hermes')
         w.close();await w.wait_closed()
 
+    async def test_out_of_process_sender_rejects_unauthorized_recipient(self):
+        result = await self.m.standalone_send(
+            self.m.PlatformConfig({'token':'S'*48,'owner_email':'me@example.invalid'}),
+            'stranger@example.invalid', 'test')
+        self.assertIn('error', result)
+
+    async def test_registration_exposes_standalone_sender(self):
+        captured={}
+        class Registry:
+            def register_platform(self, **kwargs): captured.update(kwargs)
+        self.m.register(Registry())
+        self.assertIs(captured['standalone_sender_fn'], self.m.standalone_send)
+
 if __name__ == '__main__': unittest.main()

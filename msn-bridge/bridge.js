@@ -5,6 +5,8 @@
 // the environment (defaults are Escargot). The installer sets them to the
 // local server (127.0.0.1 / http://127.0.0.1:8081/login).
 const net = require('net');
+const http = require('http');
+const crypto = require('crypto');
 const path = require('path');
 const readline = require('readline');
 const MSNClient = require('./msnclient/main.js').MSNClient;
@@ -12,10 +14,64 @@ const MSNClient = require('./msnclient/main.js').MSNClient;
 const email = process.env.MSN_BOT_EMAIL;
 const password = process.env.MSN_BOT_PASSWORD;
 const token = process.env.HERMES_MSN_BRIDGE_TOKEN;
+const owner = String(process.env.HERMES_MSN_OWNER_EMAIL || '').trim().toLowerCase();
 if (!email || !password || !token || token.length < 32) {
   console.error('Set MSN_BOT_EMAIL, MSN_BOT_PASSWORD and HERMES_MSN_BRIDGE_TOKEN (32+ chars).');
   process.exit(2);
 }
+
+// Standalone Hermes send_message (CLI/cron/tool subprocess) runs outside the
+// gateway's Python process. Give it a narrow authenticated loopback-only way
+// to ask the EXISTING logged-in MSN bot to send a text message.
+const STANDALONE_SEND_PORT = 18769;
+const MAX_SEND_BODY = 8192;
+function authenticated(request) {
+  const provided = request.headers['x-hermes-token'];
+  if (typeof provided !== 'string') return false;
+  const supplied = Buffer.from(provided, 'utf8');
+  const expected = Buffer.from(token, 'utf8');
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+const standaloneServer = http.createServer((req, res) => {
+  function reply(code, payload) {
+    const body = JSON.stringify(payload);
+    res.writeHead(code, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'});
+    res.end(body);
+  }
+  if (!authenticated(req)) return reply(401, {error: 'unauthorized'});
+  if (req.method !== 'POST' || req.url !== '/send') return reply(404, {error: 'not found'});
+  const length = Number(req.headers['content-length']);
+  if (!Number.isInteger(length) || length < 2 || length > MAX_SEND_BODY ||
+      req.headers['transfer-encoding']) return reply(413, {error: 'invalid length'});
+  let body = '';
+  req.on('data', chunk => {
+    body += chunk.toString('utf8');
+    if (Buffer.byteLength(body, 'utf8') > MAX_SEND_BODY) req.destroy();
+  });
+  req.on('end', async () => {
+    let packet;
+    try {packet = JSON.parse(body);} catch {return reply(400, {error: 'invalid JSON'});}
+    if (typeof packet.to !== 'string' || !owner ||
+        packet.to.trim().toLowerCase() !== owner) return reply(403, {error: 'recipient not authorized'});
+    if (typeof packet.text !== 'string' || !packet.text.trim() ||
+        packet.text.length > 4000) return reply(400, {error: 'invalid message'});
+    if (client.active !== true) return reply(503, {error: 'MSN bot is not signed in'});
+    try {
+      await client.sendMessage(owner, packet.text);
+      return reply(202, {success: true, queued: true});
+    } catch (error) {
+      console.error('MSN standalone send failed:', error.message);
+      return reply(503, {error: 'MSN send failed'});
+    }
+  });
+});
+standaloneServer.listen(STANDALONE_SEND_PORT, '127.0.0.1', () => {
+  console.log('MSN standalone sender listening on loopback');
+});
+standaloneServer.on('error', error => {
+  console.error('MSN standalone sender bind failed:', error.message);
+  process.exit(1);
+});
 
 const client = new MSNClient(email, password);
 let bridge, bridgeReady = false;

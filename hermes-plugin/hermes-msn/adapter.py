@@ -6,6 +6,7 @@ Optional LAN-only XP connection probe: configurable bind IP:18765, *no secrets*.
 Designed for Hermes' documented platform plugin API; not a standalone service.
 """
 import asyncio
+import http.client
 import hmac
 import json
 import logging
@@ -191,6 +192,53 @@ def _env_enablement():
                                 ("HERMES_MSN_OWNER_EMAIL", "owner_email", None)))
 
 
+async def standalone_send(config, chat_id, message, *, thread_id=None,
+                          media_files=None, force_document=False):
+    """Out-of-process Hermes send_message delivery via the local MSN bridge.
+
+    A cron/terminal CLI call doesn't share the gateway runner's Python
+    adapter registry. The Node bridge already owns the authenticated MSN
+    session, so it exposes a token-protected *loopback only* send endpoint.
+    This never contacts XP directly and never sends to arbitrary recipients.
+    """
+    if media_files or force_document:
+        return {"error": "MSN standalone sender supports text only"}
+    extra = getattr(config, "extra", None)
+    token = str(extra_or_secret(extra, "token", "HERMES_MSN_BRIDGE_TOKEN") or "")
+    owner = str(extra_or_secret(extra, "owner_email", "HERMES_MSN_OWNER_EMAIL") or "").strip().lower()
+    if len(token) < 32 or not owner or chat_id.strip().lower() != owner:
+        return {"error": "MSN recipient not authorized or bridge not configured"}
+    if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+        return {"error": "MSN message must be 1–4000 characters"}
+    payload = json.dumps({"to": owner, "text": message}, ensure_ascii=False).encode("utf-8")
+    if len(payload) > 8192:
+        return {"error": "MSN message too large"}
+
+    def _post():
+        conn = http.client.HTTPConnection("127.0.0.1", 18769, timeout=8)
+        try:
+            conn.request("POST", "/send", body=payload,
+                         headers={"X-Hermes-Token": token, "Content-Type": "application/json"})
+            response = conn.getresponse()
+            data = response.read(512)
+            if response.status != 202:
+                return {"error": f"MSN bridge rejected send (HTTP {response.status})"}
+            result = json.loads(data)
+            if not result.get("success"):
+                return {"error": "MSN bridge did not accept the send"}
+            # The bridge queues a send via the MSN library; not an end-to-end
+            # acknowledgement of delivery to Windows Live Messenger.
+            return {"success": True, "message_id": str(uuid.uuid4()), "queued": True}
+        finally:
+            conn.close()
+
+    try:
+        return await asyncio.to_thread(_post)
+    except (OSError, ValueError, http.client.HTTPException) as exc:
+        log.warning("MSN standalone bridge request failed: %s", type(exc).__name__)
+        return {"error": "MSN bridge sender unavailable on localhost"}
+
+
 def register(ctx):
     ctx.register_platform(
         name="hermes_msn", label="Hermes XP MSN Messenger",
@@ -201,6 +249,7 @@ def register(ctx):
         allowed_users_env="HERMES_MSN_ALLOWED_USERS",
         allow_all_env="HERMES_MSN_ALLOW_ALL_USERS",
         max_message_length=4000,
+        standalone_sender_fn=standalone_send,
         platform_hint="You are speaking to the owner via classic MSN Messenger. Send plain text, avoid Markdown formatting.",
         emoji="💬",
     )

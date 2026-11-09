@@ -15,6 +15,23 @@ install XP, and pair the laptop (the XP installer can be copied over USB).
 Subsequently, a normal `hermes plugins update hermes-msn` triggers an XP
 client update automatically. The update timer retries offline machines.
 
+### MSN as a Hermes messaging channel
+
+MSN registers as the `hermes_msn` platform. Incoming Messenger conversations
+reach the Hermes gateway; outbound messages can be sent through the normal
+Hermes `send_message` tool or from a separate CLI/cron process:
+
+```bash
+hermes send --to hermes_msn:user@hermes.local "test"
+```
+
+Replace the recipient with your configured `HERMES_MSN_OWNER_EMAIL` if needed.
+The standalone sender uses a token-authenticated local HTTP endpoint on
+`127.0.0.1:18769` on the Hermes host. It can send only to the configured
+owner, and never exposes that endpoint to XP or the public internet. A
+successful response means the MSN bot accepted the message for sending,
+not that Windows Live Messenger acknowledged its delivery.
+
 **No XP-to-GitHub connection is required.** The Hermes computer downloads
 prebuilt, checksum-verified release binaries when the release matches its
 installed plugin revision. If no matching release exists, it builds with

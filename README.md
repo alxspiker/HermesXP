@@ -385,6 +385,14 @@ owner, and never exposes that endpoint to XP or the public internet. A
 successful response means the MSN bot accepted the message for sending,
 not that Windows Live Messenger acknowledged its delivery.
 
+File transfer uses that same owner-only loopback control plane. Inbound
+MSNP2P chunks are stored under `~/.hermes/msn-transfers/inbox`. Hermes sees
+only `[file received] name (size bytes, sha256 ...)`, never the bytes.
+Outbound files are outbox basenames (`POST /file/send`). Direct-connect
+invites are declined; the host does not dial an address from a chat invite
+and does not execute the file. Host tests do not prove Windows Live
+Messenger on XP completed a transfer.
+
 **No XP-to-GitHub connection is required.** The Hermes computer downloads
 prebuilt, checksum-verified release binaries when the release matches its
 installed plugin revision. If no matching release exists, it builds with
@@ -540,6 +548,13 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 5. On XP: run `HermesXP-Setup.exe` from the trusted LAN package directory (or transfer it over USB), then launch HermesXP from the Start menu and click **Install for MSN**. The button places `escargot.dll` and both Switcher INIs next to Messenger, installs the local CA into Trusted Root, patches both Messenger exes to load the Switcher at startup (originals backed up as `.bak`), and launches Messenger. The portable ZIP is available for troubleshooting.
    - Sign in to WLM as `user@hermes.local` (or your configured owner address) with the printed password. The bot (`hermes-bot@hermes.local`) is already in your contacts — pick it and send it a message. Only the configured owner address is allowed through the bridge into Hermes. The Hermes gateway itself must be running.
 6. Verify: `systemctl --user status msn-server.service msn-tls.service hermes-msn-bridge.service`, and check the gateway log shows the platform connected and the bridge logged in.
+7. Optional custom content, host-side only. Set any of these before the bridge starts. Nothing is invented if they are unset. Re-run `install.sh` (it applies `patch-server.py`) and restart `msn-server` before expecting WLM to fetch the restored tile URLs; this repo change does not restart the service.
+   ```sh
+   HERMES_MSN_DP=/path/to/hermes.png
+   HERMES_MSN_BACKGROUND=/path/to/background.png
+   HERMES_MSN_EMOTICONS_DIR=/path/to/emoticons
+   ```
+   `hermes.png` is published as the `(hermes)` custom emoticon. Display pictures are stored per UUID, not by "first file in the shared directory."
 
 **Not verified yet:** the XP HTTPS sign-in against the local TLS terminator (the R1 gate — whether WLM 2009's SChannel accepts the local CA cert and TLS 1.0 + 3DES from Debian 13's OpenSSL). If sign-in fails on TLS, stop and investigate the Switcher/cert behaviour before building more code around it.
 
@@ -547,7 +562,7 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 
 - XP is unmaintained. Isolate it in a VLAN or filtered LAN. Restrict its outbound access to the necessary revival service if using Escargot; this release does not configure that network isolation.
 - The XP probe is **unencrypted and unauthenticated** by design, and only exchanges a machine name and OK/BAD result. It does not grant device control or prove identity. Never treat a positive response as pairing.
-- The MSN bridge is plaintext **loopback-only** and protected with a long shared token. Do not expose port 18764 to the LAN or internet.
+- The MSN bridge is plaintext **loopback-only** and protected with a long shared token. Do not expose port 18764 to the LAN or internet. File bytes stay on that switchboard path and in `~/.hermes/msn-transfers`; they are not a remote-exec channel and are not live-verified on XP.
 - User address filtering is applied in both Node and Python. Other Messenger contacts cannot submit agent messages through this code, but the public MSN service is a separate trust boundary.
 - No remote code execution, auto-installation, service installation, file modification or Windows Registry edits in this prototype.
 - Nothing here bypasses XP security support end-of-life or fixes its browser/TLS stack.

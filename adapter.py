@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import time
 import uuid
 
 from gateway.platforms.base import BasePlatformAdapter, SendResult
@@ -30,6 +31,96 @@ PROBE_PORT = 18765
 SAFE_HOSTNAME = re.compile(r"[A-Za-z0-9-]{1,63}\Z")
 
 
+class OfflineOutboundQueue:
+    """Host-local FIFO of texts not yet handed to the MSN bridge.
+
+    A corrupt file is never rewritten. Callers must treat a read error as
+    "do not claim this text was stored."
+    """
+
+    MAX_ITEMS = 64
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def pending(self):
+        return self._read()
+
+    def enqueue(self, to, text):
+        try:
+            items = self._read()
+        except (OSError, ValueError) as err:
+            log.warning("MSN offline queue unreadable: %s", type(err).__name__)
+            return {"ok": False, "error": "offline queue unreadable"}
+        if len(items) >= self.MAX_ITEMS:
+            return {"ok": False, "error": "offline queue full"}
+        item = {
+            "id": str(uuid.uuid4()),
+            "to": to,
+            "text": text,
+            "queued_at": time.time(),
+        }
+        items.append(item)
+        try:
+            self._write(items)
+        except OSError as err:
+            log.warning("MSN offline queue write failed: %s", type(err).__name__)
+            return {"ok": False, "error": "offline queue unreadable"}
+        return {"ok": True, "id": item["id"]}
+
+    def ack(self, message_id):
+        items = [item for item in self._read() if item.get("id") != message_id]
+        self._write(items)
+
+    def _read(self):
+        if not self.path.exists():
+            return []
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ValueError("invalid queue")
+        for item in data["items"]:
+            if not isinstance(item, dict):
+                raise ValueError("invalid item")
+            if not isinstance(item.get("id"), str) or not item["id"]:
+                raise ValueError("invalid id")
+            if not isinstance(item.get("to"), str) or not isinstance(item.get("text"), str):
+                raise ValueError("invalid payload")
+            if not isinstance(item.get("queued_at"), (int, float)):
+                raise ValueError("invalid timestamp")
+        return data["items"]
+
+    def _write(self, items):
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        payload = json.dumps({"items": items}, ensure_ascii=False).encode("utf-8")
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self.path)
+        os.chmod(self.path, 0o600)
+
+_FILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._()-]{0,79}\Z")
+_FILE_BLOCKED = re.compile(
+    r"(?:^|\.)(exe|bat|cmd|com|scr|pif|vbs|vbe|js|jse|wsf|wsh|msi|dll|lnk|ps1|hta|cpl|msc|jar|gadget)(?:\.|\Z)",
+    re.IGNORECASE)
+_FILE_RESERVED = re.compile(r"^(con|prn|aux|nul|com[1-9]|lpt[1-9])\Z", re.IGNORECASE)
+_FILE_SHA = re.compile(r"^[0-9a-f]{64}\Z")
+MAX_MSN_FILE_BYTES = 8388608
+
+
+def safe_file_basename(name):
+    if not isinstance(name, str) or not _FILE_NAME.match(name):
+        return None
+    if _FILE_RESERVED.match(name.split(".", 1)[0]):
+        return None
+    if _FILE_BLOCKED.search(name):
+        return None
+    return name
+
+
 class MSNPlatformAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("hermes_msn"))
@@ -41,6 +132,10 @@ class MSNPlatformAdapter(BasePlatformAdapter):
         self.bridge_writer = None
         self._bridge_tasks = set()
         self._write_lock = asyncio.Lock()
+        queue_path = os.environ.get("HERMES_MSN_OFFLINE_QUEUE", "").strip()
+        if not queue_path:
+            queue_path = str(Path.home() / ".hermes" / "hermesxp-gateway-offline-queue.json")
+        self.offline_queue = OfflineOutboundQueue(queue_path)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if len(self.secret) < 32 or not self.owner or "@" not in self.owner:
@@ -110,6 +205,7 @@ class MSNPlatformAdapter(BasePlatformAdapter):
             writer.write(b'{"type":"hello_ok"}\n')
             await writer.drain()
             log.info("Local MSN bridge connected")
+            await self._flush_offline_queue()
             while True:
                 data = await reader.readline()
                 if not data:
@@ -118,7 +214,32 @@ class MSNPlatformAdapter(BasePlatformAdapter):
                     msg = json.loads(data)
                 except (ValueError, UnicodeDecodeError):
                     continue
-                if not isinstance(msg, dict) or msg.get("type") != "incoming":
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "incoming_file":
+                    if any(key in msg for key in ("contents", "body", "text", "path")):
+                        continue
+                    sender = str(msg.get("sender", "")).lower().strip()
+                    name = safe_file_basename(msg.get("name"))
+                    size = msg.get("size")
+                    digest = msg.get("sha256")
+                    if (sender != self.owner or name is None or type(size) is not int or
+                            size < 1 or size > MAX_MSN_FILE_BYTES or
+                            not isinstance(digest, str) or not _FILE_SHA.match(digest)):
+                        continue
+                    notice = f"[file received] {name} ({size} bytes, sha256 {digest})"
+                    event = MessageEvent(
+                        text=notice,
+                        message_type=MessageType.TEXT,
+                        user_id=sender,
+                        user_name=sender,
+                        message_id=str(uuid.uuid4()),
+                        source=SessionSource(platform=Platform("hermes_msn"), chat_id=sender,
+                                             chat_type="dm", user_id=sender, user_name=sender),
+                    )
+                    await self.handle_message(event)
+                    continue
+                if msg.get("type") != "incoming":
                     continue
                 sender = str(msg.get("sender", "")).lower().strip()
                 body = msg.get("body", "")
@@ -145,17 +266,66 @@ class MSNPlatformAdapter(BasePlatformAdapter):
             writer.close()
             await writer.wait_closed()
 
+    def _write_send(self, writer, chat_id, text):
+        writer.write((json.dumps(
+            {"type": "send", "to": chat_id, "text": text},
+            ensure_ascii=False) + "\n").encode("utf-8"))
+
+    def _queue_offline(self, chat_id, text):
+        queued = self.offline_queue.enqueue(chat_id, text)
+        if not queued["ok"]:
+            return SendResult(
+                success=False,
+                error=queued["error"],
+                retryable=queued["error"] == "offline queue full",
+            )
+        return SendResult(
+            success=True,
+            message_id=queued["id"],
+            raw_response={"queued": True, "offline": True},
+            retryable=False,
+        )
+
+    async def _flush_offline_queue(self):
+        async with self._write_lock:
+            try:
+                pending = self.offline_queue.pending()
+            except (OSError, ValueError):
+                log.warning("MSN offline queue unreadable; not flushing")
+                return
+            for item in pending:
+                writer = self.bridge_writer
+                if writer is None or writer.is_closing():
+                    return
+                try:
+                    self._write_send(writer, item["to"], item["text"])
+                    await writer.drain()
+                except OSError:
+                    return
+                try:
+                    self.offline_queue.ack(item["id"])
+                except (OSError, ValueError):
+                    return
+
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         chat_id = str(chat_id).strip().lower()
         if chat_id != self.owner:
             return SendResult(success=False, error="Recipient not authorized")
         async with self._write_lock:
+            file_name = metadata.get("file") if isinstance(metadata, dict) else None
             if not self.bridge_writer or self.bridge_writer.is_closing():
-                return SendResult(success=False, error="MSN bridge is offline", retryable=True)
+                if file_name is not None:
+                    return SendResult(success=False, error="MSN bridge is offline", retryable=True)
+                return self._queue_offline(chat_id, str(content)[:4000])
             try:
-                text = str(content)
-                self.bridge_writer.write((json.dumps({"type":"send", "to":chat_id, "text":text[:4000]},
-                                                     ensure_ascii=False)+"\n").encode("utf-8"))
+                if file_name is not None:
+                    safe = safe_file_basename(file_name)
+                    if safe is None:
+                        return SendResult(success=False, error="MSN file name is not an outbox basename")
+                    packet = {"type": "send_file", "to": chat_id, "name": safe}
+                else:
+                    packet = {"type": "send", "to": chat_id, "text": str(content)[:4000]}
+                self.bridge_writer.write((json.dumps(packet, ensure_ascii=False)+"\n").encode("utf-8"))
                 await self.bridge_writer.drain()
                 return SendResult(success=True, message_id=str(uuid.uuid4()))
             except OSError as err:
@@ -203,23 +373,33 @@ async def standalone_send(config, chat_id, message, *, thread_id=None,
     session, so it exposes a token-protected *loopback only* send endpoint.
     This never contacts XP directly and never sends to arbitrary recipients.
     """
-    if media_files or force_document:
-        return {"error": "MSN standalone sender supports text only"}
     extra = getattr(config, "extra", None)
     token = str(extra_or_secret(extra, "token", "HERMES_MSN_BRIDGE_TOKEN") or "")
     owner = str(extra_or_secret(extra, "owner_email", "HERMES_MSN_OWNER_EMAIL") or "").strip().lower()
     if len(token) < 32 or not owner or chat_id.strip().lower() != owner:
         return {"error": "MSN recipient not authorized or bridge not configured"}
-    if not isinstance(message, str) or not message.strip() or len(message) > 4000:
-        return {"error": "MSN message must be 1–4000 characters"}
-    payload = json.dumps({"to": owner, "text": message}, ensure_ascii=False).encode("utf-8")
-    if len(payload) > 8192:
-        return {"error": "MSN message too large"}
+    route = "/send"
+    if media_files:
+        if not isinstance(media_files, (list, tuple)) or len(media_files) != 1:
+            return {"error": "MSN file send accepts one outbox basename"}
+        name = safe_file_basename(media_files[0])
+        if name is None:
+            return {"error": "MSN files must be outbox basenames"}
+        payload = json.dumps({"to": owner, "name": name}, ensure_ascii=False).encode("utf-8")
+        route = "/file/send"
+    else:
+        if force_document:
+            return {"error": "MSN standalone sender supports text only"}
+        if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+            return {"error": "MSN message must be 1–4000 characters"}
+        payload = json.dumps({"to": owner, "text": message}, ensure_ascii=False).encode("utf-8")
+        if len(payload) > 8192:
+            return {"error": "MSN message too large"}
 
     def _post():
         conn = http.client.HTTPConnection("127.0.0.1", 18769, timeout=8)
         try:
-            conn.request("POST", "/send", body=payload,
+            conn.request("POST", route, body=payload,
                          headers={"X-Hermes-Token": token, "Content-Type": "application/json"})
             response = conn.getresponse()
             data = response.read(512)

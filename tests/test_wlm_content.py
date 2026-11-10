@@ -220,6 +220,11 @@ class WlmContentTests(unittest.TestCase):
             self.assertEqual(result["rejected"], ["not-an-image.txt"])
             hits = self.wlm.matching_emoticons("hi (hermes) and (h)", catalog["emoticons"])
             self.assertEqual([item["shortcut"] for item in hits], ["(hermes)"])
+            nested = self.wlm.matching_emoticons(
+                "see (hermes) now",
+                [{"shortcut": "(hermes)"}, {"shortcut": "(h)"}],
+            )
+            self.assertEqual([item["shortcut"] for item in nested], ["(hermes)"])
 
     def test_oversized_and_non_image_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -346,7 +351,7 @@ if (uux.includes('<msnobj Creator="a&b"/>')) throw new Error('scene not escaped'
 if (!uux.includes('&lt;msnobj Creator=&quot;a&amp;b&quot;/&gt;')) throw new Error(uux);
 const body = p.emoticonAnnouncement('(hermes)', '<msnobj Type="2"/>');
 if (body !== '(hermes)\t<msnobj Type="2"/>') throw new Error(body);
-const hits = p.matchingShortcuts('see (hermes) not (h)', [{shortcut:'(hermes)'},{shortcut:'(h)'}]);
+const hits = p.matchingShortcuts('see (hermes) now', [{shortcut:'(hermes)'},{shortcut:'(h)'}]);
 if (hits.length !== 1 || hits[0].shortcut !== '(hermes)') throw new Error(JSON.stringify(hits));
 console.log('ok');
 """

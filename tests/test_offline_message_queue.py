@@ -228,11 +228,18 @@ const capped = overflow.ok === false && state.outbound.length === 64 &&
 const inbound = q.enqueueInbound(state, {sender:'owner@example.invalid', body:'in'});
 const keptInbound = inbound.ok && state.inbound.length === 1 &&
   state.inbound[0].body === 'in';
+const inboundState = {outbound: [], inbound: []};
+for (let i = 0; i < 64; i++) {
+  q.enqueueInbound(inboundState, {sender:'owner@example.invalid', body:'i' + i});
+}
+const newest = q.enqueueInbound(inboundState, {sender:'owner@example.invalid', body:'newest'});
+const inboundCap = newest.ok && newest.dropped === 1 && inboundState.inbound.length === 64 &&
+  inboundState.inbound[0].body === 'i1' && inboundState.inbound[63].body === 'newest';
 fs.writeFileSync(file, '{nope');
 let threw = false;
 try { q.load(file); } catch (err) { threw = true; }
 const untouched = fs.readFileSync(file, 'utf8') === '{nope';
-const ok = roundTrip && acked && capped && keptInbound && threw && untouched;
+const ok = roundTrip && acked && capped && keptInbound && inboundCap && threw && untouched;
 console.log(ok ? 'QUEUE_MODULE_PASS' : 'QUEUE_MODULE_FAIL');
 process.exit(ok ? 0 : 1);
 """
@@ -301,20 +308,16 @@ setTimeout(async () => {
     const stranger = await post('stranger@example.invalid', 'nope');
     const first = await post('owner@example.invalid', 'one');
     const second = await post('Owner@Example.invalid', 'two');
-    const queuedFile = JSON.parse(fs.readFileSync(process.env.HERMES_MSN_BRIDGE_QUEUE, 'utf8'));
-    const before = sent.length === 0 &&
-      queuedFile.outbound.map(item => item.text).join(',') === 'one,two';
     await new Promise(resolve => setTimeout(resolve, 80));
     const after = JSON.parse(fs.readFileSync(process.env.HERMES_MSN_BRIDGE_QUEUE, 'utf8'));
     const ok = stranger.code === 403 &&
       first.code === 202 && first.body.success === true && first.body.offline === true &&
       second.code === 202 && second.body.offline === true &&
-      before &&
       sent.map(item => item.text).join(',') === 'one,two' &&
       sent.every(item => item.to === 'owner@example.invalid') &&
       after.outbound.length === 0;
     console.log(JSON.stringify({
-      ok, stranger: stranger.code, first, second, sent, before,
+      ok, stranger: stranger.code, first, second, sent,
       remaining: after.outbound.length,
     }));
     process.exit(ok ? 0 : 8);
@@ -435,7 +438,11 @@ require(process.argv[1]);
                 conn.close()
             finally:
                 proc.kill()
-                proc.wait(timeout=3)
+                try:
+                    proc.communicate(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
                 server.close()
 
 

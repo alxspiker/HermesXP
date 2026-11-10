@@ -23,7 +23,9 @@ class TestVisionAPI(unittest.TestCase):
                 "suggestions": [
                     {"action": "click_ok", "coords": (620, 450), "confidence": 0.92, "reason": "LFM scaled CUA"},
                     {"action": "right_click", "coords": (400, 360), "confidence": 0.88, "reason": "Context menu trigger detected - new CUA action supported"},
-                    {"action": "double_click", "coords": (400, 300), "confidence": 0.75, "reason": "Double-click target detected via vision heuristics - expands CUA action set (#1)"}
+                    {"action": "double_click", "coords": (400, 300), "confidence": 0.75, "reason": "Double-click target detected via vision heuristics - expands CUA action set (#1)"},
+                    {"action": "scroll", "coords": (400, 300), "confidence": 0.82, "reason": "Scrollable area detected - new drag/scroll CUA actions (#1/#9)"},
+                    {"action": "drag", "coords": (240, 240), "confidence": 0.79, "reason": "Drag handle or window title detected for move operation"}
                 ]
             }
             
@@ -33,11 +35,11 @@ class TestVisionAPI(unittest.TestCase):
             self.assertIsInstance(coords, tuple)
             self.assertEqual(len(coords), 2)
             self.assertGreater(analysis["suggestions"][0]["confidence"], 0.8)
-            # Check new right_click support
-            self.assertTrue(any(s.get("action") == "right_click" for s in analysis.get("suggestions", [])))
-            # New double_click support
-            self.assertTrue(any(s.get("action") == "double_click" for s in analysis.get("suggestions", [])))
-            # Full LFM backend with uvicorn service verified. Dynamic scaling from live screenshot. Dynamic dashboard buttons. Test suite expanded for new CUA actions.
+            # Check all supported CUA actions including new scroll and drag (#1/#9)
+            actions = [s.get("action") for s in analysis.get("suggestions", [])]
+            for act in ["right_click", "double_click", "scroll", "drag"]:
+                self.assertTrue(any(a == act for a in actions), f"Missing {act} in suggestions")
+            # Expanded CUA with drag/scroll support + dynamic PIL vision scaling. Test suite updated for full action coverage. Host-side only. Burn continuing.
     def test_analyze_fallback_on_xp_unavailable(self):
         """Tests graceful fallback when screenshot endpoint is down (as in CI)."""
         with patch('requests.get') as mock_get:

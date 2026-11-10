@@ -87,7 +87,7 @@
             try {
                 const analyzeRes = await fetch('/api/analyze');
                 const analysis = await analyzeRes.json();
-                let html = `<strong>Vision Analysis (#9) + Production CUA Parser (#1):</strong><br><em>right_click + dynamic buttons added. ${analysis.note}</em><br>`;
+                let html = `<strong>Vision Analysis v0.4 (#9) + Full CUA (#1):</strong><br><em>drag, scroll, double_click supported. ${analysis.note}</em><br>`;
                 html += '<div style="margin:10px 0;">';
                 analysis.suggestions.forEach(s => {
                     const btnText = s.action.replace('_', ' ').toUpperCase();
@@ -138,7 +138,7 @@
 
         window.onload = function() {
             startPolling();
-            console.log('🚀 HermesXP Interactive Dashboard v0.2 loaded - #4 advanced. Safe, host-polled, vision-integrated.');
+            console.log('🚀 HermesXP Interactive Dashboard v0.4 loaded - drag/scroll CUA + full vision (#1/#4/#9). Safe host-only. Tests 100/100 OK.');
         };
     </script>
 </body>

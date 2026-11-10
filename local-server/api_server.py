@@ -21,6 +21,56 @@ async def root():
 async def status():
     return {"services": "active", "dashboard": "v0.5", "vision": "heuristic-only", "cua": "simulated-drag-scroll", "xp_endpoint": "screenshot-only"}
 
+def generate_heuristic_suggestions(width: int, height: int) -> list:
+    """Pure function for heuristic CUA suggestions. Testable independently.
+    Proportional coords only; no real vision model (advances #9 safely)."""
+    return [
+        {
+            "action": "click_ok",
+            "coords": (int(width * 0.775), int(height * 0.75)),
+            "confidence": 0.92,
+            "reason": f"Heuristic coordinate estimate; not visually detected"
+        },
+        {
+            "action": "close_window",
+            "coords": (int(width * 0.975), int(height * 0.08)),
+            "confidence": 0.85,
+            "reason": "Title bar close button estimate"
+        },
+        {
+            "action": "type_text",
+            "coords": (int(width * 0.2), int(height * 0.45)),
+            "text": "user@example.com",
+            "confidence": 0.78,
+            "reason": "Heuristic text-entry location estimate; no text field detection performed"
+        },
+        {
+            "action": "right_click",
+            "coords": (int(width * 0.5), int(height * 0.6)),
+            "confidence": 0.88,
+            "reason": "Heuristic midpoint estimate; no target detection performed"
+        },
+        {
+            "action": "double_click",
+            "coords": (int(width * 0.5), int(height * 0.5)),
+            "confidence": 0.75,
+            "reason": "Heuristic center estimate; no double-click target detection performed"
+        },
+        {
+            "action": "scroll",
+            "coords": (int(width * 0.5), int(height * 0.5)),
+            "confidence": 0.82,
+            "reason": "Heuristic center estimate; scrollable area not detected"
+        },
+        {
+            "action": "drag",
+            "coords": (int(width * 0.3), int(height * 0.4)),
+            "confidence": 0.79,
+            "reason": "Heuristic window-area estimate; no draggable element detection performed"
+        }
+    ]
+
+
 @app.get("/api/analyze")
 async def analyze_screenshot():
     """Host-side vision analysis for XP screenshot. Returns CUA-style suggestions. No XP commands."""
@@ -30,15 +80,11 @@ async def analyze_screenshot():
         resp = requests.get(screenshot_url, timeout=5)
         resp.raise_for_status()
         
-        # Real host-side analysis using PIL for size + dynamic CUA coords scaled to actual screenshot (advances real local_multimodal integration)
+        # Real host-side analysis using PIL for size + dynamic CUA coords 
+        # Now uses extracted helper for independent testability (addresses previous inline limitation)
         img = Image.open(io.BytesIO(resp.content))
         width, height = img.size
-        
-        # Proportional coordinates are estimates only; no UI element detector is wired in.
-        ok_x = int(width * 0.775)
-        ok_y = int(height * 0.75)
-        close_x = int(width * 0.975)
-        close_y = int(height * 0.08)
+        suggestions = generate_heuristic_suggestions(width, height)
         
         analysis = {
             "status": "success",
@@ -46,52 +92,8 @@ async def analyze_screenshot():
             "timestamp": datetime.now().isoformat(),
             "screenshot_size": f"{width}x{height}",
             "detected": [],
-            "suggestions": [
-                {
-                    "action": "click_ok",
-                    "coords": (ok_x, ok_y),
-                    "confidence": 0.92,
-                    "reason": f"Heuristic coordinate estimate at {ok_x},{ok_y}; not visually detected"
-                },
-                {
-                    "action": "close_window",
-                    "coords": (close_x, close_y),
-                    "confidence": 0.85,
-                    "reason": f"Title bar close at {close_x},{close_y}"
-                },
-                {
-                    "action": "type_text",
-                    "coords": (int(width * 0.2), int(height * 0.45)),
-                    "text": "user@example.com",
-                    "confidence": 0.78,
-                    "reason": "Heuristic text-entry location estimate; no text field detection performed"
-                },
-                {
-                    "action": "right_click",
-                    "coords": (int(width * 0.5), int(height * 0.6)),
-                    "confidence": 0.88,
-                    "reason": "Heuristic midpoint estimate; no target detection performed"
-                },
-                {
-                    "action": "double_click",
-                    "coords": (int(width * 0.5), int(height * 0.5)),
-                    "confidence": 0.75,
-                    "reason": "Heuristic center estimate; no double-click target detection performed"
-                },
-                {
-                    "action": "scroll",
-                    "coords": (int(width * 0.5), int(height * 0.5)),
-                    "confidence": 0.82,
-                    "reason": "Heuristic center estimate; scrollable area not detected"
-                },
-                {
-                    "action": "drag",
-                    "coords": (int(width * 0.3), int(height * 0.4)),
-                    "confidence": 0.79,
-                    "reason": "Heuristic window-area estimate; no draggable element detection performed"
-                }
-            ],
-            "note": "Heuristic proportional coordinates only; no UI elements are detected and no local vision model is called."
+            "suggestions": suggestions,
+            "note": "Heuristic proportional coordinates only; no UI elements are detected and no local vision model is called. Extracted helper enables isolated testing."
         }
         return JSONResponse(analysis)
     except Exception as e:

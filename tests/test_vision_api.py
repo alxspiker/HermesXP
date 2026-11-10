@@ -34,6 +34,21 @@ class TestVisionAPI(unittest.TestCase):
             self.assertTrue(0 <= suggestion["coords"][0] < 80)
             self.assertTrue(0 <= suggestion["coords"][1] < 60)
 
+    def test_generate_heuristic_suggestions_returns_proportional_coords_for_various_sizes(self):
+        from api_server import generate_heuristic_suggestions
+        for w, h in [(800, 600), (1024, 768), (640, 480)]:
+            suggestions = generate_heuristic_suggestions(w, h)
+            self.assertEqual(len(suggestions), 7)
+            for s in suggestions:
+                self.assertIn("action", s)
+                self.assertIn("coords", s)
+                self.assertIn("confidence", s)
+                self.assertIn("reason", s)
+                x, y = s["coords"]
+                self.assertTrue(0 <= x < w, f"X {x} out of bounds for width {w}")
+                self.assertTrue(0 <= y < h, f"Y {y} out of bounds for height {h}")
+                self.assertGreater(s["confidence"], 0.7)
+
     def test_analyze_endpoint_returns_error_for_unreadable_image(self):
         response = MagicMock()
         response.content = b"not a bitmap"

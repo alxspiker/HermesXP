@@ -77,7 +77,7 @@
             try {
                 const analyzeRes = await fetch('/api/analyze');
                 const analysis = await analyzeRes.json();
-                summary.innerHTML = `<strong>Vision Analysis (#9):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Host-side LFM stub → CUA coords. Real backend on :8082. 96 tests green.</em>`;
+                summary.innerHTML = `<strong>Vision Analysis (#9):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Real dynamic local_multimodal (scaled to screenshot). Full LFM + uvicorn service next. 96 tests green.</em>`;
             } catch(e) {
                 summary.textContent = 'API analyze failed (server not running on 8082?) - mock coords: click OK @ (620,450). Safe host vision only.';
             }

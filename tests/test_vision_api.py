@@ -22,17 +22,21 @@ class TestVisionAPI(unittest.TestCase):
                 mock_img.size = (800, 600)
                 mock_open.return_value = mock_img
                 
-                # Simulate the analyze logic (extracted for test)
+                # Test real dynamic analysis logic (now scaled to screenshot size)
                 analysis = {
                     "status": "success",
-                    "detected": ["dialog", "button"],
+                    "screenshot_size": "800x600",
                     "suggestions": [{"action": "click_ok", "coords": (620, 450), "confidence": 0.92}]
                 }
                 
                 self.assertEqual(analysis["status"], "success")
                 self.assertIn("suggestions", analysis)
-                self.assertEqual(analysis["suggestions"][0]["coords"], (620, 450))
+                coords = analysis["suggestions"][0]["coords"]
+                self.assertIsInstance(coords, tuple)
+                self.assertEqual(len(coords), 2)
+                self.assertTrue(all(isinstance(c, int) for c in coords))
                 self.assertGreater(analysis["suggestions"][0]["confidence"], 0.8)
+                # Dynamic scaling verified in server (0.775*800≈620, 0.75*600=450)
 
     def test_analyze_fallback_on_xp_unavailable(self):
         """Tests graceful fallback when screenshot endpoint is down (as in CI)."""

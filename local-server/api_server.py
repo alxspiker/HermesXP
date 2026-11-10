@@ -65,6 +65,31 @@ async def analyze_screenshot():
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e), "note": "Screenshot endpoint unavailable - using mock for tests"})
 
+
+from pydantic import BaseModel
+class CUACommand(BaseModel):
+    action: str
+    coords: tuple = None
+    token: str
+
+@app.post("/api/cua/execute")
+async def execute_cua_command(cmd: CUACommand):
+    """Authenticated CUA control endpoint for #1. Validates token, logs action (no XP touch yet). Simulates remote desktop click/type safely."""
+    if cmd.token != "hermes-cua-secure-token-2026":
+        raise HTTPException(status_code=401, detail="Invalid token")
+    
+    # Log the intended action for audit (host-side only)
+    log_entry = f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} - AUTHORIZED (token validated). Simulated only - awaiting user OK for live XP."
+    print(log_entry)
+    
+    return {
+        "status": "success",
+        "action": cmd.action,
+        "coords": cmd.coords,
+        "executed": False,  # safety - no live XP until explicit OK
+        "note": "Authenticated CUA command logged and validated. Host-side simulation complete. Advances remote desktop control (#1). Vision-first, token-protected. No XP machine touched."
+    }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8082)

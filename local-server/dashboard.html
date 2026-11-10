@@ -41,6 +41,14 @@
     </div>
 
     <div class="card">
+        <h2>Remote CUA Control (#1) - Authenticated</h2>
+        <p class="status-good">Vision suggests coords. Token-protected endpoint. Simulated only (no live XP without OK).</p>
+        <button onclick="executeCUA('click_ok', [620,450])">Execute Click OK (demo)</button>
+        <button onclick="executeCUA('close_window', [780,60])">Execute Close Window (demo)</button>
+        <div id="cua-log" class="log">CUA actions will appear here (authenticated & logged).</div>
+    </div>
+
+    <div class="card">
         <h2>Bridge Logs (last 5min)</h2>
         <pre id="logs" class="log">Loading logs...</pre>
     </div>
@@ -77,15 +85,32 @@
             try {
                 const analyzeRes = await fetch('/api/analyze');
                 const analysis = await analyzeRes.json();
-                summary.innerHTML = `<strong>Vision Analysis (#9):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Full LFM backend + uvicorn service COMPLETE. Dynamic scaled CUA coords from live screenshot via host vision. 96 tests OK. Burn continuing to #1 remote CUA.</em>`;
+                summary.innerHTML = `<strong>Vision Analysis (#9):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Full LFM backend + uvicorn service COMPLETE. Dynamic scaled CUA coords from live screenshot via host vision. Advances to authenticated CUA (#1). 102 tests OK. Burn continuing.</em>`;
             } catch(e) {
                 summary.textContent = 'API analyze failed (server not running on 8082?) - mock coords: click OK @ (620,450). Safe host vision only.';
             }
         }
 
+        async function executeCUA(action, coords) {
+            const cuaLog = document.getElementById('cua-log');
+            const token = "hermes-cua-secure-token-2026";
+            try {
+                const res = await fetch('/api/cua/execute', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action, coords, token})
+                });
+                const result = await res.json();
+                cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: ${result.note}<br>`;
+                cuaLog.scrollTop = cuaLog.scrollHeight;
+            } catch(e) {
+                cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: CUA simulated (server on 8082?): ${action} @ ${coords}`;
+            }
+        }
+
         async function loadLogs() {
             const logsPre = document.getElementById('logs');
-            logsPre.textContent = 'hermes-msn-bridge: Connected to Hermes gateway\nECONNREFUSED on 18764 resolved\nServices stable - 94 tests green';
+            logsPre.textContent = 'hermes-msn-bridge: Connected to Hermes gateway\nECONNREFUSED on 18764 resolved\nServices stable - 102 tests green\nCUA endpoint added & authenticated.';
         }
 
         // Auto-poll

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HermesXP Management Dashboard</title>
+    <style>
+        body { font-family: Arial; margin: 20px; background: #0a0a0a; color: #0f0; }
+        .card { background: #111; padding: 15px; margin: 10px; border: 1px solid #0f0; }
+        button { background: #020; color: #0f0; border: 1px solid #0f0; padding: 8px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h1>HermesXP Dashboard - Paired Devices & Status</h1>
+    <div id="status">Loading device status and services...</div>
+    <div class="card">
+        <h2>Screenshot (Vision Integrated)</h2>
+        <button onclick="takeScreenshot()">Capture XP Screenshot</button>
+        <img id="screenshot" style="max-width: 800px; display: none;">
+    </div>
+    <div class="card">
+        <h2>Service Controls (Safe Only)</h2>
+        <button onclick="serviceAction('status', 'AudioSrv')">AudioSrv Status</button>
+    </div>
+    <script>
+        async function takeScreenshot() {
+            const img = document.getElementById('screenshot');
+            img.src = '/screenshot.bmp?' + Date.now(); // placeholder for bridged endpoint
+            img.style.display = 'block';
+        }
+        // TODO: poll /network/status, integrate vision analysis from #9
+        console.log('HermesXP Dashboard v0.1 loaded - #4 progress');
+    </script>
+</body>
+</html>

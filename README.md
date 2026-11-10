@@ -562,4 +562,4 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 
 ## Next milestone
 
-Vision integration (#9) for screenshot analysis using local-multimodal/vision_analyze on /screenshot.bmp endpoint to enable smarter remote ops and CUA-style suggestions (advancing #1 safely without arbitrary XP commands). Burner runs advancing remote control, voice, tests, and CI. Full dashboard (#4) and hardened security (#7) next. All changes pushed to main first.
+Vision integration (#9) completed. **Web dashboard (#4) advanced:** initial static HTML skeleton with status cards, screenshot viewer (leveraging vision from #9), and safe service buttons added to local-server/dashboard.html. Foundation for polling bridge endpoints, device registry, and interactive remote ops. Burner runs advancing one major per session. Full interactive dashboard, automated test suite (#5), and security (#7) next. All changes pushed to main first.

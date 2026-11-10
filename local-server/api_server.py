@@ -97,6 +97,62 @@ async def analyze_screenshot():
         return JSONResponse({"status": "error", "message": str(e), "note": "Screenshot endpoint unavailable - using mock for tests"})
 
 
+class CUARequestLimitMiddleware:
+    """Bound CUA request buffering before FastAPI parses JSON."""
+    LIMIT = 4096
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if (scope.get("type") != "http" or scope.get("method") != "POST" or
+                scope.get("path") != "/api/cua/execute"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None:
+            try:
+                if int(raw_length) > self.LIMIT:
+                    await self._too_large(scope, send)
+                    return
+            except ValueError:
+                await self._too_large(scope, send)
+                return
+
+        body = bytearray()
+        more_body = True
+        while more_body:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body.extend(message.get("body", b""))
+            if len(body) > self.LIMIT:
+                await self._too_large(scope, send)
+                return
+            more_body = message.get("more_body", False)
+
+        delivered = False
+        async def replay_receive():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return {"type": "http.disconnect"}
+
+        await self.app(scope, replay_receive, send)
+
+    async def _too_large(self, scope, send):
+        body = b'{"detail":"CUA request body exceeds 4096 bytes"}'
+        await send({"type": "http.response.start", "status": 413,
+                    "headers": [(b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode("ascii"))]})
+        await send({"type": "http.response.body", "body": body})
+
+
 from pydantic import BaseModel, Field, model_validator
 from typing import Literal, Optional
 class CUACommand(BaseModel):
@@ -116,7 +172,7 @@ async def execute_cua_command(cmd: CUACommand, request: Request):
     """Authenticate against host-configured secret and exact allowed peer; log only, never execute."""
     expected_token = os.environ.get("HERMES_CUA_TOKEN")
     allowed_ip = os.environ.get("HERMES_CUA_ALLOWED_IP")
-    if not expected_token or not allowed_ip:
+    if not expected_token or len(expected_token) < 32 or not allowed_ip:
         raise HTTPException(status_code=503, detail="CUA is not configured")
     if request.client is None or request.client.host != allowed_ip:
         raise HTTPException(status_code=403, detail="Source IP not allowed")
@@ -132,6 +188,8 @@ async def execute_cua_command(cmd: CUACommand, request: Request):
     return {"status": "accepted", "action": cmd.action, "coords": cmd.coords,
             "text": cmd.text, "executed": False,
             "note": "Authenticated request validated and logged. Live XP execution is disabled."}
+
+app.add_middleware(CUARequestLimitMiddleware)
 
 if __name__ == "__main__":
     import uvicorn

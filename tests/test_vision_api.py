@@ -115,5 +115,67 @@ class TestVisionAPI(unittest.TestCase):
             os.environ.pop("HERMES_CUA_TOKEN", None)
             os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
 
+    def test_cua_rejects_short_configured_secret(self):
+        import os
+        from fastapi.testclient import TestClient
+        from api_server import app
+        os.environ["HERMES_CUA_TOKEN"] = "x" * 31
+        os.environ["HERMES_CUA_ALLOWED_IP"] = "testclient"
+        try:
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "click", "token": "x" * 32
+            })
+            self.assertEqual(response.status_code, 503)
+        finally:
+            os.environ.pop("HERMES_CUA_TOKEN", None)
+            os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_accepts_authenticated_action_only_as_simulation(self):
+        import os
+        from fastapi.testclient import TestClient
+        from api_server import app
+        token = "s" * 32
+        os.environ["HERMES_CUA_TOKEN"] = token
+        os.environ["HERMES_CUA_ALLOWED_IP"] = "testclient"
+        try:
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "click", "coords": [10, 20], "token": token
+            })
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json()["executed"])
+        finally:
+            os.environ.pop("HERMES_CUA_TOKEN", None)
+            os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_rejects_declared_oversized_body(self):
+        from fastapi.testclient import TestClient
+        from api_server import app
+        response = TestClient(app).post("/api/cua/execute", content=b" " * 4097)
+        self.assertEqual(response.status_code, 413)
+
+    def test_cua_rejects_streamed_oversized_body_without_content_length(self):
+        import asyncio
+        from api_server import app
+        from starlette.types import Scope
+
+        scope: Scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": "/api/cua/execute",
+            "raw_path": b"/api/cua/execute", "query_string": b"",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("testclient", 123), "server": ("testserver", 80),
+        }
+        messages = [
+            {"type": "http.request", "body": b" " * 3000, "more_body": True},
+            {"type": "http.request", "body": b" " * 1097, "more_body": False},
+        ]
+        sent = []
+        async def receive():
+            return messages.pop(0)
+        async def send(message):
+            sent.append(message)
+        asyncio.run(app(scope, receive, send))
+        self.assertEqual(sent[0]["status"], 413)
+
 if __name__ == '__main__':
     unittest.main()

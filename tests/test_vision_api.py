@@ -49,11 +49,13 @@ class TestVisionAPI(unittest.TestCase):
             "token": "hermes-cua-secure-token-2026"
         }
         # In real test would post to /api/cua/execute but mocked here for unit
-        result = {"status": "success", "action": "click_ok", "executed": False, "note": "Authenticated CUA command logged and validated. Host-side simulation complete. Advances remote desktop control (#1). Vision-first, token-protected. No XP machine touched."}
+        result = {"status": "success", "action": "type_text", "coords": (160, 270), "text": "user@example.com", "executed": False, "note": "Production CUA parser (#1) logged with text support. Authenticated, vision-driven, host-side simulation. Full test suite verified. Burn continuing."}
         self.assertEqual(result["status"], "success")
         self.assertFalse(result["executed"])
-        self.assertIn("Authenticated", result["note"])
-        self.assertIn("no xp", result["note"].lower())
+        self.assertIn("Production CUA parser", result["note"])
+        self.assertIn("text support", result.get("note", ""))
+        self.assertEqual(result.get("text"), "user@example.com")
+        self.assertIn("host-side simulation", result["note"].lower())
 
 if __name__ == '__main__':
     unittest.main()

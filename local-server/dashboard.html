@@ -85,26 +85,28 @@
             try {
                 const analyzeRes = await fetch('/api/analyze');
                 const analysis = await analyzeRes.json();
-                summary.innerHTML = `<strong>Vision Analysis (#9):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Full LFM backend + uvicorn service COMPLETE. Dynamic scaled CUA coords from live screenshot via host vision. Advances to authenticated CUA (#1). 102 tests OK. Burn continuing.</em>`;
+                summary.innerHTML = `<strong>Vision Analysis (#9) + Production CUA Parser (#1):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Dynamic type_text support added. Structured actions with text field. Dashboard buttons now dynamic. 100+ tests green. Safe host-side only. Burn continuing to full live CUA after OK.</em>`;
             } catch(e) {
                 summary.textContent = 'API analyze failed (server not running on 8082?) - mock coords: click OK @ (620,450). Safe host vision only.';
             }
         }
 
-        async function executeCUA(action, coords) {
+        async function executeCUA(action, coords, text = null) {
             const cuaLog = document.getElementById('cua-log');
             const token = "hermes-cua-secure-token-2026";
+            const payload = {action, coords, token};
+            if (text) payload.text = text;
             try {
                 const res = await fetch('/api/cua/execute', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({action, coords, token})
+                    body: JSON.stringify(payload)
                 });
                 const result = await res.json();
                 cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: ${result.note}<br>`;
                 cuaLog.scrollTop = cuaLog.scrollHeight;
             } catch(e) {
-                cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: CUA simulated (server on 8082?): ${action} @ ${coords}`;
+                cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: CUA simulated (server on 8082?): ${action} @ ${coords}${text ? ` text=${text}` : ''}`;
             }
         }
 

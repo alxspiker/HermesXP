@@ -98,6 +98,65 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload['text'],'Hello from Hermes')
         w.close();await w.wait_closed()
 
+    async def test_file_notice_hides_contents_and_send_is_basename_only(self):
+        digest = '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'
+        r,w=await asyncio.open_connection('127.0.0.1',self.bridge_port)
+        w.write((json.dumps({'type':'hello','token':'S'*48})+'\n').encode());await w.drain()
+        self.assertEqual(json.loads(await r.readline()),{'type':'hello_ok'})
+        for packet in (
+            {'type':'incoming_file','sender':'me@example.invalid','name':'note.txt',
+             'size':5,'sha256':digest,'contents':'SENTINEL_DO_NOT_LEAK_9f3a'},
+            {'type':'incoming_file','sender':'stranger@example.invalid','name':'note.txt',
+             'size':5,'sha256':digest},
+            {'type':'incoming_file','sender':'me@example.invalid','name':'../note.txt',
+             'size':5,'sha256':digest},
+            {'type':'incoming_file','sender':'me@example.invalid','name':'note.txt',
+             'size':5,'sha256':digest},
+        ):
+            w.write((json.dumps(packet)+'\n').encode())
+        await w.drain(); await asyncio.sleep(.05)
+        self.assertEqual([m.text for m in self.adapter.messages], [
+            f'[file received] note.txt (5 bytes, sha256 {digest})'])
+        self.assertNotIn('SENTINEL_DO_NOT_LEAK_9f3a', self.adapter.messages[0].text)
+        rejected = await self.adapter.send(
+            'me@example.invalid', '/etc/passwd', metadata={'file':'../note.txt'})
+        self.assertFalse(rejected.success)
+        accepted = await self.adapter.send(
+            'me@example.invalid', '/etc/passwd', metadata={'file':'note.txt'})
+        self.assertTrue(accepted.success)
+        payload=json.loads(await asyncio.wait_for(r.readline(),2))
+        self.assertEqual(payload, {'type':'send_file','to':'me@example.invalid','name':'note.txt'})
+        self.assertNotIn('passwd', json.dumps(payload))
+        w.close();await w.wait_closed()
+
+    async def test_standalone_file_send_is_loopback_basename_only(self):
+        seen = []
+        class Reply:
+            status = 202
+            def read(self, _limit):
+                return b'{"success": true, "queued": true}'
+        class Connection:
+            def __init__(self, host, port, timeout):
+                self.host, self.port, self.timeout = host, port, timeout
+            def request(self, method, path, body, headers):
+                self.method, self.path, self.body, self.headers = method, path, body, headers
+                seen.append(self)
+            def getresponse(self):
+                return Reply()
+            def close(self):
+                pass
+        config = self.m.PlatformConfig({'token':'S'*48,'owner_email':'me@example.invalid'})
+        with patch.object(self.m.http.client, 'HTTPConnection', side_effect=Connection):
+            unsafe = await self.m.standalone_send(config, 'me@example.invalid', '', media_files=['/etc/passwd'])
+            self.assertIn('error', unsafe)
+            self.assertEqual(seen, [])
+            accepted = await self.m.standalone_send(config, 'me@example.invalid', '', media_files=['note.txt'])
+        self.assertTrue(accepted.get('success'))
+        self.assertEqual(seen[0].host, '127.0.0.1')
+        self.assertEqual(seen[0].path, '/file/send')
+        self.assertEqual(json.loads(seen[0].body), {'to':'me@example.invalid','name':'note.txt'})
+        self.assertEqual(seen[0].headers['X-Hermes-Token'], 'S'*48)
+
     async def test_out_of_process_sender_rejects_unauthorized_recipient(self):
         result = await self.m.standalone_send(
             self.m.PlatformConfig({'token':'S'*48,'owner_email':'me@example.invalid'}),

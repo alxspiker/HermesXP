@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import time
 import uuid
 
 from gateway.platforms.base import BasePlatformAdapter, SendResult
@@ -30,6 +31,78 @@ PROBE_PORT = 18765
 SAFE_HOSTNAME = re.compile(r"[A-Za-z0-9-]{1,63}\Z")
 
 
+class OfflineOutboundQueue:
+    """Host-local FIFO of texts not yet handed to the MSN bridge.
+
+    A corrupt file is never rewritten. Callers must treat a read error as
+    "do not claim this text was stored."
+    """
+
+    MAX_ITEMS = 64
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def pending(self):
+        return self._read()
+
+    def enqueue(self, to, text):
+        try:
+            items = self._read()
+        except (OSError, ValueError) as err:
+            log.warning("MSN offline queue unreadable: %s", type(err).__name__)
+            return {"ok": False, "error": "offline queue unreadable"}
+        if len(items) >= self.MAX_ITEMS:
+            return {"ok": False, "error": "offline queue full"}
+        item = {
+            "id": str(uuid.uuid4()),
+            "to": to,
+            "text": text,
+            "queued_at": time.time(),
+        }
+        items.append(item)
+        try:
+            self._write(items)
+        except OSError as err:
+            log.warning("MSN offline queue write failed: %s", type(err).__name__)
+            return {"ok": False, "error": "offline queue unreadable"}
+        return {"ok": True, "id": item["id"]}
+
+    def ack(self, message_id):
+        items = [item for item in self._read() if item.get("id") != message_id]
+        self._write(items)
+
+    def _read(self):
+        if not self.path.exists():
+            return []
+        data = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise ValueError("invalid queue")
+        for item in data["items"]:
+            if not isinstance(item, dict):
+                raise ValueError("invalid item")
+            if not isinstance(item.get("id"), str) or not item["id"]:
+                raise ValueError("invalid id")
+            if not isinstance(item.get("to"), str) or not isinstance(item.get("text"), str):
+                raise ValueError("invalid payload")
+            if not isinstance(item.get("queued_at"), (int, float)):
+                raise ValueError("invalid timestamp")
+        return data["items"]
+
+    def _write(self, items):
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        payload = json.dumps({"items": items}, ensure_ascii=False).encode("utf-8")
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self.path)
+        os.chmod(self.path, 0o600)
+
+
 class MSNPlatformAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("hermes_msn"))
@@ -41,6 +114,10 @@ class MSNPlatformAdapter(BasePlatformAdapter):
         self.bridge_writer = None
         self._bridge_tasks = set()
         self._write_lock = asyncio.Lock()
+        queue_path = os.environ.get("HERMES_MSN_OFFLINE_QUEUE", "").strip()
+        if not queue_path:
+            queue_path = str(Path.home() / ".hermes" / "hermesxp-gateway-offline-queue.json")
+        self.offline_queue = OfflineOutboundQueue(queue_path)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if len(self.secret) < 32 or not self.owner or "@" not in self.owner:
@@ -110,6 +187,7 @@ class MSNPlatformAdapter(BasePlatformAdapter):
             writer.write(b'{"type":"hello_ok"}\n')
             await writer.drain()
             log.info("Local MSN bridge connected")
+            await self._flush_offline_queue()
             while True:
                 data = await reader.readline()
                 if not data:
@@ -145,20 +223,64 @@ class MSNPlatformAdapter(BasePlatformAdapter):
             writer.close()
             await writer.wait_closed()
 
+    def _write_send(self, writer, chat_id, text):
+        writer.write((json.dumps(
+            {"type": "send", "to": chat_id, "text": text},
+            ensure_ascii=False) + "\n").encode("utf-8"))
+
+    def _queue_offline(self, chat_id, text):
+        queued = self.offline_queue.enqueue(chat_id, text)
+        if not queued["ok"]:
+            return SendResult(
+                success=False,
+                error=queued["error"],
+                retryable=queued["error"] == "offline queue full",
+            )
+        return SendResult(
+            success=True,
+            message_id=queued["id"],
+            raw_response={"queued": True, "offline": True},
+            retryable=False,
+        )
+
+    async def _flush_offline_queue(self):
+        async with self._write_lock:
+            try:
+                pending = self.offline_queue.pending()
+            except (OSError, ValueError):
+                log.warning("MSN offline queue unreadable; not flushing")
+                return
+            for item in pending:
+                writer = self.bridge_writer
+                if writer is None or writer.is_closing():
+                    return
+                try:
+                    self._write_send(writer, item["to"], item["text"])
+                    await writer.drain()
+                except OSError:
+                    return
+                try:
+                    self.offline_queue.ack(item["id"])
+                except (OSError, ValueError):
+                    return
+
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         chat_id = str(chat_id).strip().lower()
         if chat_id != self.owner:
             return SendResult(success=False, error="Recipient not authorized")
+        text = str(content)[:4000]
         async with self._write_lock:
-            if not self.bridge_writer or self.bridge_writer.is_closing():
-                return SendResult(success=False, error="MSN bridge is offline", retryable=True)
+            writer = self.bridge_writer
+            if writer is None or writer.is_closing():
+                return self._queue_offline(chat_id, text)
             try:
-                text = str(content)
-                self.bridge_writer.write((json.dumps({"type":"send", "to":chat_id, "text":text[:4000]},
-                                                     ensure_ascii=False)+"\n").encode("utf-8"))
-                await self.bridge_writer.drain()
+                self._write_send(writer, chat_id, text)
+                await writer.drain()
                 return SendResult(success=True, message_id=str(uuid.uuid4()))
             except OSError as err:
+                queued = self._queue_offline(chat_id, text)
+                if queued.success:
+                    return queued
                 return SendResult(success=False, error=str(err), retryable=True)
 
     async def get_chat_info(self, chat_id):

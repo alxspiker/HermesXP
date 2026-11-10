@@ -11,6 +11,11 @@ Run before the bridge starts (systemd ExecStartPre on the bridge service),
 or manually. The bridge service re-reads the env file at ExecStart, so a
 password written here is picked up by the bridge on the same start.
 
+Optional WLM content (no default image is invented):
+  HERMES_MSN_DP=/path/to/picture.png
+  HERMES_MSN_BACKGROUND=/path/to/background.png
+  HERMES_MSN_EMOTICONS_DIR=/path/to/dir   # hermes.png becomes (hermes)
+
 Usage: <venv>/bin/python ensure-bot-user.py [server-dir]
   server-dir defaults to ~/.hermes/msn-server.
 
@@ -101,6 +106,41 @@ def ensure_contacts(conn, owner_email, bot_email):
                       f"{user.email}'s list")
 
 
+def sync_bot_content(server_dir, bot_email, bot_uuid, hermes_home):
+    """Publish an explicitly configured DP, background, and emoticon set.
+
+    Unset paths are a no-op. A missing optional file must not stop the
+    bridge from signing in.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from wlm_content import ContentStore, sync_configured
+    from urllib.parse import quote
+
+    result = sync_configured(
+        ContentStore(server_dir),
+        uuid=bot_uuid,
+        creator=bot_email,
+        environ=os.environ,
+    )
+    if result.get("status") == "skipped":
+        print("wlm content: no HERMES_MSN_DP/background/emoticon dir set")
+        return result
+    updates = {}
+    if result.get("msnobj_quoted"):
+        updates["MSN_BOT_MSNOBJ"] = result["msnobj_quoted"]
+    if result.get("scene"):
+        updates["MSN_BOT_SCENE"] = quote(result["scene"], safe="")
+    if result.get("catalog_path"):
+        updates["MSN_BOT_EMOTICON_CATALOG"] = result["catalog_path"]
+    if updates:
+        env_path = os.path.join(hermes_home, ".env")
+        bridge_env_path = os.path.join(hermes_home, "msn-bridge.env")
+        _upsert_env(bridge_env_path, updates)
+        _upsert_env(env_path, updates)
+    print(f"wlm content: {result.get('status')} rejected={result.get('rejected')}")
+    return result
+
+
 def main():
     server_dir = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SERVER_DIR
     sys.path.insert(0, server_dir)
@@ -155,6 +195,13 @@ def main():
     _upsert_env(env_path, {"MSN_BOT_EMAIL": bot_email, "MSN_BOT_PASSWORD": pw})
     print(f"bot user ready: {bot_email} (created={created})")
     ensure_contacts(conn, _owner_email(hermes_home), bot_email)
+    try:
+        with conn.session() as sess:
+            bot = sess.query(User).filter(User.email == bot_email).one()
+            bot_uuid = bot.uuid
+        sync_bot_content(server_dir, bot_email, bot_uuid, hermes_home)
+    except Exception as exc:
+        print(f"wlm content sync skipped: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,13 @@ behaves exactly as upstream (Escargot).
    by tracing a second round-trip test on the live local server: the first
    ping arrived, the second test's invite was accepted but no switchboard
    was ever created.
+7. Switchboard file frames: the switchboard data handler now uses
+   `MSNPFrameDecoder` so a length-prefixed MSG split across TCP chunks is
+   one body. `application/x-msnmsgrp2p` is emitted as `{type:'p2p'}` and a
+   `text/x-msmsgsinvite` file invite as `{type:'file_invite'}`. `sendP2P`
+   writes `MSG <trid> D`. Text MSG still goes through `parseMessageSB`.
+   The bridge, not this client, decides whether a file is stored. This
+   client never dials an address from an invite.
 
 ## Local defaults used by the HermesXP installer
 

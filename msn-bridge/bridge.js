@@ -14,6 +14,8 @@ const os = require('os');
 const MSNClient = require('./msnclient/main.js').MSNClient;
 const {NativeCall} = require('./native_call.js');
 const {interfaceForXP} = require('./lan_address.js');
+const offlineQueue = require('./offline_queue.js');
+const {TransferStore} = require('./file_transfer.js');
 
 const email = process.env.MSN_BOT_EMAIL;
 const password = process.env.MSN_BOT_PASSWORD;
@@ -24,13 +26,95 @@ if (!email || !password || !token || token.length < 32) {
   process.exit(2);
 }
 
+function bridgeQueuePath() {
+  if (process.env.HERMES_MSN_BRIDGE_QUEUE) return process.env.HERMES_MSN_BRIDGE_QUEUE;
+  const home = process.env.HERMES_HOME || path.join(os.homedir(), '.hermes');
+  return path.join(home, 'hermesxp-bridge-queue.json');
+}
+const queuePath = bridgeQueuePath();
+let queueState = null;
+let queueBroken = false;
+try {
+  queueState = offlineQueue.load(queuePath);
+} catch (err) {
+  queueBroken = true;
+  console.error('MSN offline queue unreadable; refusing to replace it:', err.message);
+}
+function persistQueue() {
+  if (!queueState || queueBroken) return false;
+  try {
+    offlineQueue.save(queuePath, queueState);
+    return true;
+  } catch (err) {
+    queueBroken = true;
+    console.error('MSN offline queue write failed:', err.message);
+    return false;
+  }
+}
+let flushingOutbound = false;
+function queueOutbound(text) {
+  if (!queueState || queueBroken || !owner) return {ok: false, error: 'offline queue unreadable'};
+  const result = offlineQueue.enqueueOutbound(queueState, {to: owner, text});
+  if (!result.ok) return result;
+  if (!persistQueue()) return {ok: false, error: 'offline queue unreadable'};
+  return result;
+}
+async function flushOutbound() {
+  if (flushingOutbound || !queueState || queueBroken || client.active !== true) return;
+  flushingOutbound = true;
+  try {
+    while (queueState.outbound.length && client.active === true) {
+      const item = queueState.outbound[0];
+      try {
+        await client.sendMessage(item.to, item.text);
+      } catch (err) {
+        console.error('MSN offline flush stopped:', err.message);
+        return;
+      }
+      if (queueState.outbound[0] && queueState.outbound[0].id === item.id) {
+        queueState.outbound.shift();
+        if (!persistQueue()) return;
+      }
+    }
+  } finally {
+    flushingOutbound = false;
+  }
+}
+function acceptOutbound(text) {
+  const body = String(text).slice(0, 4000);
+  const mustQueue = client.active !== true || flushingOutbound ||
+    Boolean(queueState && queueState.outbound.length);
+  if (mustQueue) {
+    const queued = queueOutbound(body);
+    if (queued.ok && client.active === true) void flushOutbound();
+    return queued;
+  }
+  try {
+    const pending = client.sendMessage(owner, body);
+    if (pending && typeof pending.catch === 'function') {
+      pending.catch(err => {
+        console.error('MSN send failed; queueing:', err.message);
+        const queued = queueOutbound(body);
+        if (queued.ok) void flushOutbound();
+      });
+    }
+    return {ok: true, direct: true};
+  } catch (err) {
+    const queued = queueOutbound(body);
+    if (queued.ok && client.active === true) void flushOutbound();
+    return queued.ok ? queued : {ok: false, error: err.message};
+  }
+}
+
 // Standalone Hermes send_message (CLI/cron/tool subprocess) runs outside the
 // gateway's Python process. Give it a narrow authenticated loopback-only way
 // to ask the EXISTING logged-in MSN bot to send a text message.
 const STANDALONE_SEND_PORT = Number(process.env.HERMES_MSN_STANDALONE_PORT || 18769);
+const GATEWAY_PORT = Number(process.env.HERMES_MSN_GATEWAY_PORT || 18764);
 if (!Number.isInteger(STANDALONE_SEND_PORT) || STANDALONE_SEND_PORT < 1 ||
-    STANDALONE_SEND_PORT > 65535) {
-  throw new Error('Invalid standalone MSN bridge port');
+    STANDALONE_SEND_PORT > 65535 ||
+    !Number.isInteger(GATEWAY_PORT) || GATEWAY_PORT < 1 || GATEWAY_PORT > 65535) {
+  throw new Error('Invalid MSN bridge port');
 }
 const MAX_SEND_BODY = 8192;
 function authenticated(request) {
@@ -70,6 +154,35 @@ const standaloneServer = http.createServer((req, res) => {
       return reply(503, {error: 'native MSN call signaling unavailable'});
     }
   }
+  if (req.method === 'POST' && req.url === '/file/send') {
+    const length = Number(req.headers['content-length']);
+    if (!Number.isInteger(length) || length < 2 || length > 1024 ||
+        req.headers['transfer-encoding']) return reply(413, {error: 'invalid length'});
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk.toString('utf8');
+      if (Buffer.byteLength(body, 'utf8') > 1024) req.destroy();
+    });
+    req.on('end', () => {
+      let packet;
+      try {packet = JSON.parse(body);} catch {return reply(400, {error: 'invalid JSON'});}
+      if (typeof packet.to !== 'string' || !owner ||
+          packet.to.trim().toLowerCase() !== owner) return reply(403, {error: 'recipient not authorized'});
+      if (typeof packet.name !== 'string') return reply(400, {error: 'invalid file'});
+      const offered = transfers.offer(owner, packet.name);
+      if (!offered.ok || offered.dial) return reply(400, {error: 'file rejected'});
+      if (client.active !== true || typeof client.sendP2P !== 'function')
+        return reply(503, {error: 'MSN bot is not signed in'});
+      try {
+        for (const part of offered.packets) client.sendP2P(owner, part);
+      } catch (error) {
+        console.error('MSN file offer failed:', error.message);
+        return reply(503, {error: 'MSN file send failed'});
+      }
+      return reply(202, {success: true, queued: true, name: offered.name});
+    });
+    return;
+  }
   if (req.method !== 'POST' || req.url !== '/send') return reply(404, {error: 'not found'});
   const length = Number(req.headers['content-length']);
   if (!Number.isInteger(length) || length < 2 || length > MAX_SEND_BODY ||
@@ -86,14 +199,14 @@ const standaloneServer = http.createServer((req, res) => {
         packet.to.trim().toLowerCase() !== owner) return reply(403, {error: 'recipient not authorized'});
     if (typeof packet.text !== 'string' || !packet.text.trim() ||
         packet.text.length > 4000) return reply(400, {error: 'invalid message'});
-    if (client.active !== true) return reply(503, {error: 'MSN bot is not signed in'});
-    try {
-      await client.sendMessage(owner, packet.text);
-      return reply(202, {success: true, queued: true});
-    } catch (error) {
-      console.error('MSN standalone send failed:', error.message);
-      return reply(503, {error: 'MSN send failed'});
+    const accepted = acceptOutbound(packet.text);
+    if (!accepted.ok) return reply(503, {error: accepted.error || 'MSN send failed'});
+    if (accepted.item) {
+      return reply(202, {
+        success: true, queued: true, offline: true, message_id: accepted.item.id,
+      });
     }
+    return reply(202, {success: true, queued: true});
   });
 });
 standaloneServer.listen(STANDALONE_SEND_PORT, '127.0.0.1', () => {
@@ -105,6 +218,9 @@ standaloneServer.on('error', error => {
 });
 
 const client = new MSNClient(email, password);
+const transferRoot = process.env.HERMES_MSN_TRANSFER_ROOT || path.join(
+  process.env.HERMES_HOME || path.join(os.homedir(), '.hermes'), 'msn-transfers');
+const transfers = new TransferStore({owner, root: transferRoot});
 let nativeCall = null;
 if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
   if (!['13','18'].includes(process.env.MSN_BOT_PROTOCOL)) {
@@ -160,7 +276,7 @@ function write(obj) {
 }
 
 function connectBridge() {
-  const sock = net.connect({host: '127.0.0.1', port: 18764});
+  const sock = net.connect({host: '127.0.0.1', port: GATEWAY_PORT});
   bridge = sock;
   let buffer = '';
   let validated = false;
@@ -176,16 +292,37 @@ function connectBridge() {
         if (packet.type !== 'hello_ok') {sock.destroy(); return;}
         validated = bridgeReady = true;
         console.log('Connected to Hermes gateway');
+        if (queueState && !queueBroken) {
+          while (queueState.inbound.length) {
+            const queued = queueState.inbound[0];
+            if (!write({type:'incoming', sender:queued.sender, body:queued.body})) break;
+            queueState.inbound.shift();
+            if (!persistQueue()) break;
+          }
+        }
         for (const msg of backlog) write(msg);
         backlog=[];
+        continue;
+      }
+      if (packet.type === 'send_file' && typeof packet.to === 'string' && typeof packet.name === 'string') {
+        if (packet.to.toLowerCase() !== owner) {
+          console.warn('Refused unexpected outbound recipient'); continue;
+        }
+        const offered = transfers.offer(owner, packet.name);
+        if (!offered.ok || offered.dial) {
+          console.warn('Refused file send'); continue;
+        }
+        try {
+          for (const part of offered.packets) client.sendP2P(owner, part);
+        } catch (err) { console.error('MSN file send error:', err.message); }
         continue;
       }
       if (packet.type === 'send' && typeof packet.to === 'string' && typeof packet.text === 'string') {
         if (packet.to.toLowerCase() !== String(process.env.HERMES_MSN_OWNER_EMAIL || '').toLowerCase()) {
           console.warn('Refused unexpected outbound recipient'); continue;
         }
-        try { client.sendMessage(packet.to, packet.text); }
-        catch (err) { console.error('MSN send error:', err.message); }
+        const accepted = acceptOutbound(packet.text);
+        if (!accepted.ok) console.error('MSN send not accepted:', accepted.error);
       }
     }
   });
@@ -197,9 +334,48 @@ function connectBridge() {
 }
 
 client.on('msg', msg => {
-  if (msg && msg.type === 'connected') console.log('MSN bot logged in');
+  if (msg && msg.type === 'connected') {
+    console.log('MSN bot logged in');
+    void flushOutbound();
+  }
+  if (msg && (msg.type === 'p2p' || msg.type === 'file_invite')) {
+    const peer = String(msg.user || '').trim().toLowerCase();
+    if (!owner || peer !== owner) return;
+    if (msg.type === 'file_invite') {
+      const declined = transfers.declineLegacy(owner, String(msg.body || ''));
+      if (declined.notice) {
+        try { client.sendMessage(owner, declined.notice); }
+        catch (error) { console.error('MSN file decline failed:', error.message); }
+      }
+      return;
+    }
+    if (!Buffer.isBuffer(msg.payload)) return;
+    const result = transfers.feed(owner, msg.payload);
+    if (result && result.dial) return;
+    try {
+      for (const part of result.packets || []) client.sendP2P(owner, part);
+    } catch (error) { console.error('MSN file reply failed:', error.message); }
+    if (result.event) {
+      const item = {
+        type: result.event.type,
+        sender: owner,
+        name: result.event.name,
+        size: result.event.size,
+        sha256: result.event.sha256,
+      };
+      if (typeof result.event.relative === 'string') item.relative = result.event.relative;
+      if (!write(item)) {
+        if (backlog.length >= 16) backlog.shift();
+        backlog.push(item);
+      }
+    }
+    if (result.notice) {
+      try { client.sendMessage(owner, result.notice); }
+      catch (error) { console.error('MSN file notice failed:', error.message); }
+    }
+    return;
+  }
   if (!msg || msg.type !== 'message' || typeof msg.user !== 'string' || typeof msg.body !== 'string') return;
-  const owner = String(process.env.HERMES_MSN_OWNER_EMAIL || '').trim().toLowerCase();
   if (!owner || msg.user.trim().toLowerCase() !== owner) return;
   const command = msg.body.trim().toLowerCase();
   if (command === '/nativecall' || (command === '/call' && nativeCall)) {
@@ -225,6 +401,12 @@ client.on('msg', msg => {
   }
   const item = {type:'incoming',sender:owner,body:msg.body.slice(0,4000)};
   if (!write(item)) {
+    if (queueState && !queueBroken) {
+      const queued = offlineQueue.enqueueInbound(queueState, {
+        sender: owner, body: item.body,
+      });
+      if (queued.ok && persistQueue()) return;
+    }
     if (backlog.length >= 16) backlog.shift();
     backlog.push(item);
   }

@@ -2,6 +2,8 @@ var net = require('net');
 const crypto = require('crypto');
 var msnsocket = require('./MSNHelper.js');
 const { MSNPFrameDecoder } = require('./frame.js');
+const { p2pPayload } = require('../file_transfer.js');
+const presence = require('../wlm_presence.js');
 const { loginSSO } = require('./sso.js');
 const axios = require('axios');
 const https = require('https');
@@ -49,6 +51,18 @@ class MSNClient extends EventEmitter  {
 		this.machineGuid = '{' + crypto.randomUUID().toUpperCase() + '}';
 	}
 
+	_chg(trid, status, caps) {
+		this.client.write(presence.chgLine(
+			String(trid), status, String(caps), process.env.MSN_BOT_MSNOBJ || ''));
+	}
+
+	_advertiseScene() {
+		const scene = presence.decodeScene(process.env.MSN_BOT_SCENE || '');
+		if (!scene) return;
+		this.TrID++;
+		this.client.write(presence.uuxCommand(String(this.TrID), this.machineGuid, scene));
+	}
+
 	execute() {
 		this.client.connect(1863, MSN_SERVER_HOST, () => {
 			console.log('[DEBUG] Connected to MSN Server');
@@ -89,7 +103,8 @@ class MSNClient extends EventEmitter  {
 						    this.login, this.password, element[5]);
 						  this.client.write('USR 4 SSO S ' + proof.token + ' ' + proof.proof +
 						    ' ' + this.machineGuid + endTag);
-						  this.client.write('CHG 5 NLN ' + MSN_NATIVE_CAPS + ':0' + endTag);
+						  this._chg(5, 'NLN', MSN_NATIVE_CAPS + ':0');
+					  this._advertiseScene();
 						} catch(error){
 						  this.emit('error',new Error('MSNP18 SSO login failed: '+error.message));
 						  this.client.destroy();
@@ -118,7 +133,8 @@ class MSNClient extends EventEmitter  {
 							})
 							.catch(err => console.log('error ', this.emit(err)));
 						this.client.write('USR 4 TWN S ' + this.token + endTag);
-						this.client.write('CHG 5 NLN ' + (MSN_NATIVE_CALL ? MSN_NATIVE_CAPS : 0) + endTag);
+						this._chg(5, 'NLN', (MSN_NATIVE_CALL ? MSN_NATIVE_CAPS : 0));
+						this._advertiseScene();
 						this.TrID = 6;
 						this.active = true;
 					}
@@ -205,7 +221,14 @@ class MSNClient extends EventEmitter  {
 		                           ' ' + payload.length + '\r\n');
 		this.client.write(Buffer.concat([header, payload]));
 	}
-	
+
+	sendP2P(email, p2pBuffer) {
+		const board = this.switchboard[email];
+		if (!board || !board.switchboard || board.switchboard.destroyed)
+			throw new Error('switchboard not open');
+		board.sendP2P(email, p2pBuffer);
+	}
+
 	async sendMessage(emailArg, bodyArg) {
 		if(this.active == true) {
 			if(this.switchboard[emailArg] != null && !this.switchboard[emailArg].switchboard.destroyed) {
@@ -250,7 +273,7 @@ class MSNClient extends EventEmitter  {
 			LUN - Out to Lunch
 		*/
 		if(this.active == true) {
-			this.client.write('CHG ' + this.TrID + ' ' + status + ' 0' + endTag);
+			this._chg(this.TrID, status, '0');
 		}
 	}
 
@@ -295,6 +318,7 @@ class MSNSwitchBoard extends EventEmitter {
 		this.port = port;
 		this.TrID = 0;
 		this.switchboard = new net.Socket();
+		this.frameDecoder = new MSNPFrameDecoder();
 		this.ThreadID = Math.random()*0.001;
 
 		// Temp
@@ -310,17 +334,48 @@ class MSNSwitchBoard extends EventEmitter {
 		});
 
 		this.switchboard.on('data',  data => {
-			this.TrID++;
-			let parsed = msnsocket.parseMessageSB(data, this.email);
-			if (process.env.MSN_DEBUG === '1')
-				console.log('[DEBUG] [SWITCHBOARD] event type:', parsed && parsed.type);
-			if(parsed.type == 'joinedChat') {
-				this.sendMessage(this.tmpMessage);
-			}else if(parsed.type == 'authSuccess') {
-				console.log('CAL ' + this.TrID + ' ' + this.email + endTag);
-				this.switchboard.write('CAL ' + this.TrID + ' ' + this.email + endTag);
-			}else{
-				this.emit('msg', parsed);
+			let frames;
+			try { frames = this.frameDecoder.feed(data); }
+			catch (err) {
+				console.error('[DEBUG] [SWITCHBOARD] frame error:', err.message);
+				this.switchboard.destroy();
+				return;
+			}
+			for (const frame of frames) {
+				this.TrID++;
+				if (frame.command === 'MSG') {
+					const p2p = p2pPayload(frame.body);
+					if (p2p) {
+						this.emit('msg', {type: 'p2p', user: this.email, payload: p2p});
+						continue;
+					}
+					if (legacyFileInvite(frame.body)) {
+						const split = frame.body.indexOf('\r\n\r\n');
+						this.emit('msg', {
+							type: 'file_invite',
+							user: this.email,
+							body: split >= 0 ? frame.body.subarray(split + 4).toString('utf8') : '',
+						});
+						continue;
+					}
+					const raw = Buffer.concat([
+						Buffer.from(frame.words.join(' ') + '\r\n', 'utf8'), frame.body]);
+					const parsed = msnsocket.parseMessageSB(raw.toString('utf8'), this.email);
+					if (parsed) this.emit('msg', parsed);
+					continue;
+				}
+				const parsed = msnsocket.parseMessageSB(frame.words.join(' ') + '\r\n', this.email);
+				if (!parsed) continue;
+				if (process.env.MSN_DEBUG === '1')
+					console.log('[DEBUG] [SWITCHBOARD] event type:', parsed.type);
+				if (parsed.type == 'joinedChat') {
+					this.sendMessage(this.tmpMessage);
+				} else if (parsed.type == 'authSuccess') {
+					console.log('CAL ' + this.TrID + ' ' + this.email + endTag);
+					this.switchboard.write('CAL ' + this.TrID + ' ' + this.email + endTag);
+				} else {
+					this.emit('msg', parsed);
+				}
 			}
 		});
 		
@@ -338,14 +393,40 @@ class MSNSwitchBoard extends EventEmitter {
 		this.tmpMessage = body;
 	}
 
+	sendP2P(dest, p2pBuffer) {
+		if (!/^[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+$/.test(dest))
+			throw new Error('invalid P2P recipient');
+		if (!Buffer.isBuffer(p2pBuffer) || p2pBuffer.length < 48 || p2pBuffer.length > 16384)
+			throw new Error('invalid P2P payload');
+		this.TrID++;
+		const mime = Buffer.from(
+			'MIME-Version: 1.0\r\nContent-Type: application/x-msnmsgrp2p\r\n' +
+			'P2P-Dest: ' + dest + '\r\n\r\n');
+		const body = Buffer.concat([mime, p2pBuffer]);
+		this.switchboard.write(Buffer.concat([
+			Buffer.from('MSG ' + this.TrID + ' D ' + body.length + '\r\n'), body]));
+	}
+
 	sendMessage(body) {
+		const announcements = presence.announcementsFor(
+			body, process.env.MSN_BOT_EMOTICON_CATALOG);
+		for (const announcement of announcements) {
+			this._writePayload('text/x-mms-emoticon', announcement, false);
+		}
+		this._writePayload('text/plain; charset=UTF-8', body, true);
+	}
+
+	_writePayload(contentType, body, formatted) {
+		const format = formatted
+			? 'X-MMS-IM-Format: FN=Arial; EF=I; CO=0; CS=0; PF=22'+endTag
+			: '';
 		let msg = 'MIME-Version: 1.0'+endTag+
-				'Content-Type: text/plain; charset=UTF-8'+endTag+
-				'X-MMS-IM-Format: FN=Arial; EF=I; CO=0; CS=0; PF=22'+endTag+endTag+
+				'Content-Type: '+contentType+endTag+
+				format+endTag+
 				body;
-		this.switchboard.write( 'MSG '+this.TrID+' N ' + 
-								(new TextEncoder().encode(msg)).length + ' ' 
-								+ endTag+msg);
+		this.switchboard.write( 'MSG '+this.TrID+' N ' +
+								(new TextEncoder().encode(msg)).length + ' ' +
+								endTag+msg);
 	}
 }
 
@@ -361,5 +442,13 @@ const MSNStatuses = {
 	OutOfLunch: 'LUN'
 }
 
+function legacyFileInvite(body) {
+	if (!Buffer.isBuffer(body)) return false;
+	const head = body.subarray(0, Math.min(body.length, 1024)).toString('latin1');
+	return /content-type:\s*text\/x-msmsgsinvite/i.test(head) &&
+		/application-name:\s*file transfer/i.test(head);
+}
+
 exports.MSNClient = MSNClient;
+exports.MSNSwitchBoard = MSNSwitchBoard;
 exports.MSNStatuses = MSNStatuses;

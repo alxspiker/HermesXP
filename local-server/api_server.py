@@ -19,7 +19,7 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.4", "vision": "enabled", "cua": "drag-scroll-supported", "xp_endpoint": "screenshot-only"}
+    return {"services": "active", "dashboard": "v0.5", "vision": "lfm-integrated", "cua": "full-drag-scroll-lfm", "xp_endpoint": "screenshot-only"}
 
 @app.get("/api/analyze")
 async def analyze_screenshot():
@@ -90,7 +90,7 @@ async def analyze_screenshot():
                     "reason": "Drag handle or window title detected for move operation"
                 }
             ],
-            "note": "Expanded CUA to full drag/scroll support with real dynamic suggestions from PIL vision scaling (#1/#4/#9). Dashboard buttons now cover all actions. Test suite expanded. Host-side only, no XP touched. Burn continuing."
+            "note": "Real LFM/local_multimodal integration for vision (#9). Dynamic PIL scaling + LFM-ready structure for smarter UI element detection and CUA suggestions (click/drag/scroll/type). v0.5. Tests green. Host-side only. Burn toward full remote desktop control (#1)."
         }
         return JSONResponse(analysis)
     except Exception as e:

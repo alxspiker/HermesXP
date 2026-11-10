@@ -48,22 +48,70 @@ class TestVisionAPI(unittest.TestCase):
             self.assertEqual(analysis["status"], "error")
             self.assertIn("mock", analysis["note"])
 
-    def test_cua_execute_authenticated(self):
-        """TDD for #1: Authenticated CUA endpoint validates token and logs action safely (no XP touch)."""
-        # Mock the endpoint call
-        valid_cmd = {
-            "action": "click_ok",
-            "coords": (620, 450),
-            "token": "hermes-cua-secure-token-2026"
-        }
-        # In real test would post to /api/cua/execute but mocked here for unit
-        result = {"status": "success", "action": "type_text", "coords": (160, 270), "text": "user@example.com", "executed": False, "note": "Production CUA parser (#1) logged with text support. Authenticated, vision-driven, host-side simulation. Full test suite verified. Burn continuing."}
-        self.assertEqual(result["status"], "success")
-        self.assertFalse(result["executed"])
-        self.assertIn("Production CUA parser", result["note"])
-        self.assertIn("text support", result.get("note", ""))
-        self.assertEqual(result.get("text"), "user@example.com")
-        self.assertIn("host-side simulation", result["note"].lower())
+    def test_cua_requires_exact_peer_and_validates_action_payload(self):
+        import os
+        from fastapi.testclient import TestClient
+        from api_server import app
+        os.environ["HERMES_CUA_TOKEN"] = "test-secret-token-0123456789abcdef"
+        os.environ["HERMES_CUA_ALLOWED_IP"] = "not-testclient"
+        try:
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "click", "coords": [10, 20], "token": "test-secret-token-0123456789abcdef"
+            })
+            self.assertEqual(response.status_code, 403)
+        finally:
+            os.environ.pop("HERMES_CUA_TOKEN", None)
+            os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_requires_credentials_and_text_for_typing(self):
+        import os
+        from fastapi.testclient import TestClient
+        from api_server import app
+        client = TestClient(app)
+        response = client.post("/api/cua/execute", json={
+            "action": "click", "coords": [10, 20], "token": "test-secret-token-0123456789abcdef"
+        })
+        self.assertEqual(response.status_code, 503)
+        os.environ["HERMES_CUA_TOKEN"] = "test-secret-token-0123456789abcdef"
+        os.environ["HERMES_CUA_ALLOWED_IP"] = "testclient"
+        try:
+            response = client.post("/api/cua/execute", json={
+                "action": "type_text", "coords": [10, 20], "token": "test-secret-token-0123456789abcdef"
+            })
+            self.assertEqual(response.status_code, 422)
+        finally:
+            os.environ.pop("HERMES_CUA_TOKEN", None)
+            os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_rejects_out_of_bounds_coordinates(self):
+        import os
+        from fastapi.testclient import TestClient
+        from api_server import app
+        os.environ["HERMES_CUA_TOKEN"] = "test-secret-token-0123456789abcdef"
+        os.environ["HERMES_CUA_ALLOWED_IP"] = "testclient"
+        try:
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "click", "coords": [-1, 20], "token": "test-secret-token-0123456789abcdef"
+            })
+            self.assertEqual(response.status_code, 422)
+        finally:
+            os.environ.pop("HERMES_CUA_TOKEN", None)
+            os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_rejects_invalid_action(self):
+        import os
+        from fastapi.testclient import TestClient
+        from api_server import app
+        os.environ["HERMES_CUA_TOKEN"] = "test-secret-token-0123456789abcdef"
+        os.environ["HERMES_CUA_ALLOWED_IP"] = "testclient"
+        try:
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "shell", "coords": [1, 2], "token": "test-secret-token-0123456789abcdef"
+            })
+            self.assertEqual(response.status_code, 422)
+        finally:
+            os.environ.pop("HERMES_CUA_TOKEN", None)
+            os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
 
 if __name__ == '__main__':
     unittest.main()

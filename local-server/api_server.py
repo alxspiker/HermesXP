@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 import requests
@@ -85,35 +85,41 @@ async def analyze_screenshot():
         return JSONResponse({"status": "error", "message": str(e), "note": "Screenshot endpoint unavailable - using mock for tests"})
 
 
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field, model_validator
+from typing import Literal, Optional
 class CUACommand(BaseModel):
-    action: str
-    coords: Optional[tuple] = None
-    text: Optional[str] = None
-    token: str
+    action: Literal["click_ok", "close_window", "click", "right_click", "double_click", "type_text", "key_press", "scroll", "drag"]
+    coords: Optional[tuple[int, int]] = None
+    text: Optional[str] = Field(default=None, max_length=256)
+    token: str = Field(min_length=32, max_length=512)
+
+    @model_validator(mode="after")
+    def validate_coordinates(self):
+        if self.coords is not None and any(value < 0 or value > 8192 for value in self.coords):
+            raise ValueError("coordinates must be between 0 and 8192")
+        return self
 
 @app.post("/api/cua/execute")
-async def execute_cua_command(cmd: CUACommand):
-    """Authenticated CUA control endpoint for #1. Validates token, logs action (no XP touch yet). Simulates remote desktop click/type safely."""
-    if cmd.token != "hermes-cua-secure-token-2026":
+async def execute_cua_command(cmd: CUACommand, request: Request):
+    """Authenticate against host-configured secret and exact allowed peer; log only, never execute."""
+    expected_token = os.environ.get("HERMES_CUA_TOKEN")
+    allowed_ip = os.environ.get("HERMES_CUA_ALLOWED_IP")
+    if not expected_token or not allowed_ip:
+        raise HTTPException(status_code=503, detail="CUA is not configured")
+    if request.client is None or request.client.host != allowed_ip:
+        raise HTTPException(status_code=403, detail="Source IP not allowed")
+    if not __import__("hmac").compare_digest(cmd.token, expected_token):
         raise HTTPException(status_code=401, detail="Invalid token")
-    
-    # Log the intended action for audit (host-side only) - production CUA ready
-    if cmd.text:
-        log_entry = f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} text='{cmd.text}' - AUTHORIZED (token validated). Simulated only - awaiting user OK for live XP."
-    else:
-        log_entry = f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} - AUTHORIZED (token validated). Simulated only - awaiting user OK for live XP."
-    print(log_entry)
-    
-    return {
-        "status": "success",
-        "action": cmd.action,
-        "coords": cmd.coords,
-        "text": cmd.text,
-        "executed": False,  # safety - no live XP until explicit OK
-        "note": "Production CUA parser (#1) logged with text support. Authenticated, vision-driven, host-side simulation. Full test suite verified. Burn continuing."
-    }
+    if cmd.action in {"type_text", "key_press"} and not cmd.text:
+        raise HTTPException(status_code=422, detail="This action requires text")
+    if cmd.action not in {"type_text", "key_press"} and cmd.text is not None:
+        raise HTTPException(status_code=422, detail="Text is not allowed for this action")
+    if cmd.action in {"drag", "scroll"} and cmd.coords is None:
+        raise HTTPException(status_code=422, detail=f"{cmd.action} requires coordinates")
+    print(f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} - AUTHORIZED; simulated only")
+    return {"status": "accepted", "action": cmd.action, "coords": cmd.coords,
+            "text": cmd.text, "executed": False,
+            "note": "Authenticated request validated and logged. Live XP execution is disabled."}
 
 if __name__ == "__main__":
     import uvicorn

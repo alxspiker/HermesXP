@@ -43,6 +43,8 @@
     <div class="card">
         <h2>Remote CUA Control (#1) - Authenticated</h2>
         <p class="status-good">Vision suggests coords. Token-protected endpoint. Simulated only (no live XP without OK).</p>
+        <label for="cua-token">CUA access token:</label>
+        <input id="cua-token" type="password" autocomplete="off" placeholder="Enter configured token">
         <button onclick="executeCUA('click_ok', [620,450])">Execute Click OK (demo)</button>
         <button onclick="executeCUA('close_window', [780,60])">Execute Close Window (demo)</button>
         <div id="cua-log" class="log">CUA actions will appear here (authenticated & logged).</div>
@@ -101,7 +103,8 @@
 
         async function executeCUA(action, coords, text = null) {
             const cuaLog = document.getElementById('cua-log');
-            const token = "hermes-cua-secure-token-2026";
+            const token = document.getElementById('cua-token').value;
+            if (!token) { cuaLog.textContent = 'Enter the configured CUA token first.'; return; }
             const payload = {action, coords, token};
             if (text) payload.text = text;
             try {

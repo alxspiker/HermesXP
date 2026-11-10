@@ -563,3 +563,19 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 ## Next milestone
 
 Vision integration (#9) completed. **Web dashboard (#4) advanced with initial skeleton.** **Test suite (#5) advanced:** Added GitHub Actions CI workflow (.github/workflows/tests.yml) that runs the full unittest suite (94 tests passing) on every push/PR. README updated with CI details. All host-side tests green; foundation for XP emulation/fixture tests and dashboard API tests in place. No XP machine touched. Burn continuing with interactive dashboard + CI next. All changes pushed to main first.
+
+### Web Management Dashboard (#4)
+
+Open `local-server/dashboard.html` in a browser (or serve with `python -m http.server 8082` from the repo root). 
+
+Features:
+- Real-time service status polling (msn-server, bridge, discovery)
+- Bot list integration with manage-bots.py
+- One-click XP screenshot with vision analysis placeholder (integrates #9)
+- Safe log viewer (no arbitrary commands)
+- Dark retro terminal aesthetic matching the project
+
+All actions are host-side only. Screenshot uses the verified 18768 endpoint. Full interactive server (FastAPI or stdlib) planned for next iteration. Tests remain 94/94 green.
+
+Updated dashboard.html substantially advances the interactive UI.
+

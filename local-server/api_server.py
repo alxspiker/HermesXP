@@ -19,7 +19,7 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.5", "vision": "lfm-integrated", "cua": "full-drag-scroll-lfm", "xp_endpoint": "screenshot-only"}
+    return {"services": "active", "dashboard": "v0.5", "vision": "heuristic-only", "cua": "simulated-drag-scroll", "xp_endpoint": "screenshot-only"}
 
 @app.get("/api/analyze")
 async def analyze_screenshot():
@@ -34,7 +34,7 @@ async def analyze_screenshot():
         img = Image.open(io.BytesIO(resp.content))
         width, height = img.size
         
-        # Dynamic coords based on typical XP UI proportions (realistic for different resolutions; full LFM/VL model next)
+        # Proportional coordinates are estimates only; no UI element detector is wired in.
         ok_x = int(width * 0.775)
         ok_y = int(height * 0.75)
         close_x = int(width * 0.975)
@@ -42,15 +42,16 @@ async def analyze_screenshot():
         
         analysis = {
             "status": "success",
+            "analysis_mode": "heuristic",
             "timestamp": datetime.now().isoformat(),
             "screenshot_size": f"{width}x{height}",
-            "detected": ["XP dialog box", "OK button", "title bar", "text field"],
+            "detected": [],
             "suggestions": [
                 {
                     "action": "click_ok",
                     "coords": (ok_x, ok_y),
                     "confidence": 0.92,
-                    "reason": f"Scaled OK button at {ok_x},{ok_y} per real screenshot dimensions (host vision)"
+                    "reason": f"Heuristic coordinate estimate at {ok_x},{ok_y}; not visually detected"
                 },
                 {
                     "action": "close_window",
@@ -63,34 +64,34 @@ async def analyze_screenshot():
                     "coords": (int(width * 0.2), int(height * 0.45)),
                     "text": "user@example.com",
                     "confidence": 0.78,
-                    "reason": "Typical username field detected via vision heuristics - production CUA parser ready"
+                    "reason": "Heuristic text-entry location estimate; no text field detection performed"
                 },
                 {
                     "action": "right_click",
                     "coords": (int(width * 0.5), int(height * 0.6)),
                     "confidence": 0.88,
-                    "reason": "Context menu trigger detected - new CUA action supported"
+                    "reason": "Heuristic midpoint estimate; no target detection performed"
                 },
                 {
                     "action": "double_click",
                     "coords": (int(width * 0.5), int(height * 0.5)),
                     "confidence": 0.75,
-                    "reason": "Double-click target detected via vision heuristics - expands CUA action set (#1)"
+                    "reason": "Heuristic center estimate; no double-click target detection performed"
                 },
                 {
                     "action": "scroll",
                     "coords": (int(width * 0.5), int(height * 0.5)),
                     "confidence": 0.82,
-                    "reason": "Scrollable area detected - new drag/scroll CUA actions (#1/#9)"
+                    "reason": "Heuristic center estimate; scrollable area not detected"
                 },
                 {
                     "action": "drag",
                     "coords": (int(width * 0.3), int(height * 0.4)),
                     "confidence": 0.79,
-                    "reason": "Drag handle or window title detected for move operation"
+                    "reason": "Heuristic window-area estimate; no draggable element detection performed"
                 }
             ],
-            "note": "Real LFM/local_multimodal integration for vision (#9). Dynamic PIL scaling + LFM-ready structure for smarter UI element detection and CUA suggestions (click/drag/scroll/type). v0.5. Tests green. Host-side only. Burn toward full remote desktop control (#1)."
+            "note": "Heuristic proportional coordinates only; no UI elements are detected and no local vision model is called."
         }
         return JSONResponse(analysis)
     except Exception as e:

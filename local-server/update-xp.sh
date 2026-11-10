@@ -76,7 +76,12 @@ fi
 if python3 "$REPO/tools/update_manager.py"; then
   echo "[update-xp] all reachable paired XP clients current"
 else
-  echo "[update-xp] failed/offline devices stay pending; timer will retry"
-  exit 1
+  status=$?
+  if [ "$status" -eq 75 ]; then
+    echo "[update-xp] offline devices queued; timer will retry when reachable"
+  else
+    echo "[update-xp] host-side updater failed (exit $status); see error above"
+  fi
+  exit "$status"
 fi
 echo "=== $(date -Is) HermesXP update done ==="

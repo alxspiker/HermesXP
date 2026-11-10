@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class UpdateManagerTests(unittest.TestCase):
+    def test_offline_device_is_pending_not_host_failure(self):
+        with patch.object(update_manager, "run_update", return_value={"RUITER": "pending"}):
+            with patch.object(sys, "argv", ["update_manager.py"]):
+                self.assertEqual(update_manager.main(), update_manager.EX_TEMPFAIL)
+
+    def test_completed_fleet_is_successful(self):
+        with patch.object(update_manager, "run_update", return_value={"RUITER": "current"}):
+            with patch.object(sys, "argv", ["update_manager.py"]):
+                self.assertEqual(update_manager.main(), 0)
+
+    def test_build_error_is_still_failure(self):
+        with patch.object(update_manager, "run_update", side_effect=RuntimeError("build failed")):
+            with patch.object(sys, "argv", ["update_manager.py"]):
+                self.assertEqual(update_manager.main(), 1)
+
     def test_root_manifest_and_legacy_subdirectory_match(self):
         self.assertEqual((ROOT / "plugin.yaml").read_bytes(),
                          (ROOT / "hermes-plugin/hermes-msn/plugin.yaml").read_bytes())

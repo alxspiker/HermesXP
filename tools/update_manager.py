@@ -32,6 +32,12 @@ from tools.hermesxp_update import deploy_fleet, validate_binary  # noqa: E402
 from tools.release_assets import ASSETS, load_release  # noqa: E402
 
 
+# A powered-off XP machine is a queued deployment, not a broken Hermes host.
+# systemd's SuccessExitStatus=75 keeps the retry timer healthy while a real
+# updater/build failure (status 1) still marks the unit failed.
+EX_TEMPFAIL = 75
+
+
 def run(command: list[str], *, cwd: Path | None = None, timeout: int = 120) -> str:
     result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, timeout=timeout)
     if result.returncode:
@@ -175,7 +181,7 @@ def main() -> int:
         print(f"HermesXP update failed; existing XP software preserved: {type(exc).__name__}: {exc}",
               file=sys.stderr, flush=True)
         return 1
-    return 1 if "pending" in outcomes.values() else 0
+    return EX_TEMPFAIL if "pending" in outcomes.values() else 0
 
 
 if __name__ == "__main__":

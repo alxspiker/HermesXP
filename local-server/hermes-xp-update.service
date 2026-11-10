@@ -6,6 +6,7 @@ Wants=network-online.target msn-server.service
 [Service]
 Type=oneshot
 ExecStart=__REPO_ROOT__/local-server/update-xp.sh __REPO_ROOT__
+SuccessExitStatus=75
 
 TimeoutStartSec=240
 

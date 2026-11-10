@@ -85,7 +85,15 @@
             try {
                 const analyzeRes = await fetch('/api/analyze');
                 const analysis = await analyzeRes.json();
-                summary.innerHTML = `<strong>Vision Analysis (#9) + Production CUA Parser (#1):</strong><br>${JSON.stringify(analysis.suggestions, null, 2)}<br><em>Dynamic type_text support added. Structured actions with text field. Dashboard buttons now dynamic. 100+ tests green. Safe host-side only. Burn continuing to full live CUA after OK.</em>`;
+                let html = `<strong>Vision Analysis (#9) + Production CUA Parser (#1):</strong><br><em>right_click + dynamic buttons added. ${analysis.note}</em><br>`;
+                html += '<div style="margin:10px 0;">';
+                analysis.suggestions.forEach(s => {
+                    const btnText = s.action.replace('_', ' ').toUpperCase();
+                    const coordStr = s.coords ? ` @ ${s.coords[0]},${s.coords[1]}` : '';
+                    html += `<button onclick="executeCUA('${s.action}', ${JSON.stringify(s.coords)}, ${s.text ? `'${s.text}'` : 'null'})" style="margin:3px;">${btnText}${coordStr}</button>`;
+                });
+                html += '</div>';
+                summary.innerHTML = html;
             } catch(e) {
                 summary.textContent = 'API analyze failed (server not running on 8082?) - mock coords: click OK @ (620,450). Safe host vision only.';
             }

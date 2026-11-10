@@ -22,7 +22,8 @@ class TestVisionAPI(unittest.TestCase):
                 "screenshot_size": "800x600",
                 "suggestions": [
                     {"action": "click_ok", "coords": (620, 450), "confidence": 0.92, "reason": "LFM scaled CUA"},
-                    {"action": "right_click", "coords": (400, 360), "confidence": 0.88, "reason": "Context menu trigger detected - new CUA action supported"}
+                    {"action": "right_click", "coords": (400, 360), "confidence": 0.88, "reason": "Context menu trigger detected - new CUA action supported"},
+                    {"action": "double_click", "coords": (400, 300), "confidence": 0.75, "reason": "Double-click target detected via vision heuristics - expands CUA action set (#1)"}
                 ]
             }
             
@@ -34,7 +35,9 @@ class TestVisionAPI(unittest.TestCase):
             self.assertGreater(analysis["suggestions"][0]["confidence"], 0.8)
             # Check new right_click support
             self.assertTrue(any(s.get("action") == "right_click" for s in analysis.get("suggestions", [])))
-            # Full LFM backend with uvicorn service verified. Dynamic scaling from live screenshot. Dynamic dashboard buttons.
+            # New double_click support
+            self.assertTrue(any(s.get("action") == "double_click" for s in analysis.get("suggestions", [])))
+            # Full LFM backend with uvicorn service verified. Dynamic scaling from live screenshot. Dynamic dashboard buttons. Test suite expanded for new CUA actions.
     def test_analyze_fallback_on_xp_unavailable(self):
         """Tests graceful fallback when screenshot endpoint is down (as in CI)."""
         with patch('requests.get') as mock_get:

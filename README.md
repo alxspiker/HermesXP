@@ -562,4 +562,4 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
 
 ## Next milestone
 
-Test XP native GUI on Ruiter, identify Messenger version, verify Escargot login, then fix the experimental MSN bot library/adapter until a true MSN → Hermes → MSN conversation is observed. After that, add authenticated device pairing and limited XP tools (without opening a remote shell by default).
+Vision integration (#9) for screenshot analysis using local-multimodal/vision_analyze on /screenshot.bmp endpoint to enable smarter remote ops and CUA-style suggestions (advancing #1 safely without arbitrary XP commands). Burner runs advancing remote control, voice, tests, and CI. Full dashboard (#4) and hardened security (#7) next. All changes pushed to main first.

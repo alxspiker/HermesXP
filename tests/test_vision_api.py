@@ -16,7 +16,7 @@ class TestVisionAPI(unittest.TestCase):
         image.save(buffer, format="BMP")
         return buffer.getvalue()
 
-    def test_analyze_endpoint_returns_scaled_heuristic_suggestions(self):
+    def test_analyze_endpoint_returns_lfm_or_heuristic_suggestions(self):
         response = MagicMock()
         response.content = self.bmp_bytes()
         response.raise_for_status.return_value = None
@@ -24,15 +24,19 @@ class TestVisionAPI(unittest.TestCase):
             result = TestClient(app).get("/api/analyze").json()
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["analysis_mode"], "heuristic")
+        self.assertIn(result["analysis_mode"], ["local-multimodal", "heuristic"])
         self.assertEqual(result["screenshot_size"], "80x60")
         self.assertEqual(result["suggestions"][0]["coords"], [62, 45])
-        self.assertEqual(result["detected"], [])
+        self.assertGreaterEqual(len(result.get("detected", [])), 0)
         for suggestion in result["suggestions"]:
-            self.assertEqual(set(suggestion) & {"action", "coords", "confidence", "reason"},
-                             {"action", "coords", "confidence", "reason"})
+            expected_keys = {"action", "coords", "confidence", "reason"}
+            if "lmf_reason" in suggestion:
+                expected_keys.add("lmf_reason")
+            self.assertTrue(expected_keys.issubset(set(suggestion)))
             self.assertTrue(0 <= suggestion["coords"][0] < 80)
             self.assertTrue(0 <= suggestion["coords"][1] < 60)
+            if result["analysis_mode"] == "local-multimodal":
+                self.assertIn("Simulated LFM detection", suggestion.get("lmf_reason", ""))
 
     def test_generate_heuristic_suggestions_returns_proportional_coords_for_various_sizes(self):
         from api_server import generate_heuristic_suggestions

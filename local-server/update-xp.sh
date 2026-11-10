@@ -22,6 +22,19 @@ REV_FILE="$HERMES_HOME/msn-server/.xp-active-plugin-revision"
 CURRENT="$(cat "$REV_FILE" 2>/dev/null || true)"
 if [ "$REVISION" != "$CURRENT" ]; then
   echo "[update-xp] plugin changed ($CURRENT -> $REVISION)"
+  # A plugin upgrade must update its *installed* systemd units too. Merely
+  # changing the source template leaves the old service rules in place.
+  UNITS="$HOME/.config/systemd/user"
+  mkdir -p "$UNITS"
+  sed "s|__REPO_ROOT__|$REPO|g" "$REPO/local-server/hermes-xp-update.service" \
+    > "$UNITS/hermes-xp-update.service.tmp"
+  mv -f "$UNITS/hermes-xp-update.service.tmp" "$UNITS/hermes-xp-update.service"
+  cp "$REPO/local-server/hermes-xp-update.path" "$UNITS/hermes-xp-update.path.tmp"
+  mv -f "$UNITS/hermes-xp-update.path.tmp" "$UNITS/hermes-xp-update.path"
+  cp "$REPO/local-server/hermes-xp-update.timer" "$UNITS/hermes-xp-update.timer.tmp"
+  mv -f "$UNITS/hermes-xp-update.timer.tmp" "$UNITS/hermes-xp-update.timer"
+  systemctl --user daemon-reload
+  systemctl --user enable --now hermes-xp-update.path hermes-xp-update.timer
   # The live Node bridge runs from ~/.hermes/msn-bridge, not the plugin
   # checkout. Sync the bridge entrypoint BEFORE restarting its service.
   # Never copy tokens, local account settings or node_modules from GitHub.

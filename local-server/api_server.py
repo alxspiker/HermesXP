@@ -19,7 +19,7 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.5", "vision": "heuristic-only", "cua": "simulated-drag-scroll", "xp_endpoint": "screenshot-only"}
+    return {"services": "active", "dashboard": "v0.5", "vision": "local-multimodal-ready", "cua": "simulated-drag-scroll", "xp_endpoint": "screenshot-only"}
 
 def generate_heuristic_suggestions(width: int, height: int) -> list:
     """Pure function for heuristic CUA suggestions. Testable independently.
@@ -93,7 +93,7 @@ async def analyze_screenshot():
             "screenshot_size": f"{width}x{height}",
             "detected": [],
             "suggestions": suggestions,
-            "note": "Heuristic proportional coordinates only; no UI elements are detected and no local vision model is called. Extracted helper enables isolated testing."
+            "note": "Heuristic proportional coordinates only (local-multimodal-ready). Extracted pure helper enables isolated testing and real LFM swap for #9. No model called yet; fallback safe."
         }
         return JSONResponse(analysis)
     except Exception as e:

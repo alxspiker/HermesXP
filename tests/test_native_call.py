@@ -41,6 +41,48 @@ assert.deepEqual(parsed[0].body,presence);
 assert.equal(parsed[1].command,'RNG');
 """)
 
+    def test_msnp_stream_boundary_conformance(self):
+        self.run_js(r"""
+const assert = require('assert');
+const {MSNPFrameDecoder} = require('./msnclient/frame.js');
+const binary = Buffer.from([0, 13, 10, 255, 65, 66]);
+const presence = Buffer.from('<Data><PSM>hi</PSM></Data>');
+function frame(command, header, body) {
+  return Buffer.concat([Buffer.from(command + ' ' + header + ' ' + body.length + '\r\n'), body]);
+}
+const examples = [
+  frame('UBN', 'peer@example.test 1', binary),
+  frame('UBX', '1:peer@example.test', presence),
+  frame('UUN', '23 peer@example.test 12', Buffer.from('INVITE\r\n\0SIP')),
+];
+for (const bytes of examples) {
+  const expectedBody = bytes.subarray(bytes.indexOf(Buffer.from('\r\n')) + 2);
+  for (let split = 0; split <= bytes.length; split++) {
+    const decoder = new MSNPFrameDecoder();
+    const first = decoder.feed(bytes.subarray(0, split));
+    if (split < bytes.length) assert.deepEqual(first, [], 'premature frame at split ' + split);
+    const decoded = first.length ? first : decoder.feed(bytes.subarray(split));
+    assert.equal(decoded.length, 1, 'frame count at split ' + split);
+    assert.deepEqual(decoded[0].body, expectedBody, 'body at split ' + split);
+    assert.equal(decoder.pending.length, 0);
+  }
+}
+const bytewise = new MSNPFrameDecoder();
+const joined = Buffer.concat([examples[0], Buffer.from('UUN 24 OK\r\n'), examples[1]]);
+let parsed = [];
+for (const byte of joined) parsed.push(...bytewise.feed(Buffer.from([byte])));
+assert.equal(parsed.length, 3);
+assert.deepEqual(parsed[0].body, binary);
+assert.deepEqual(parsed[1].body, Buffer.alloc(0));
+assert.deepEqual(parsed[2].body, presence);
+const coalesced = new MSNPFrameDecoder().feed(joined);
+assert.equal(coalesced.length, 3);
+assert.deepEqual(coalesced.map(item => item.command), ['UBN', 'UUN', 'UBX']);
+assert.throws(() => new MSNPFrameDecoder().feed(Buffer.from('UBX 1:peer nope\r\n')), /Invalid MSNP payload length/);
+assert.throws(() => new MSNPFrameDecoder().feed(Buffer.from('UBX 1:peer 65537\r\n')), /Invalid MSNP payload length|exceeds size limit/);
+assert.throws(() => new MSNPFrameDecoder().feed(Buffer.alloc(67585, 65)), /exceeds bounded buffer|incomplete frame exceeds size limit/);
+""");
+
     def test_msnp18_sso_rps_key_derivation(self):
         self.run_js(r"""
 const assert = require('assert');

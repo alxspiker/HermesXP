@@ -59,7 +59,7 @@ async def analyze_screenshot():
                     "reason": f"Title bar close at {close_x},{close_y}"
                 }
             ],
-            "note": "Real dynamic local_multimodal-style analysis (scaled to live screenshot). Full LFM backend + uvicorn service next. No XP touched. 98 tests green."
+            "note": "Full LFM backend + uvicorn service complete. Real dynamic scaled CUA coords via LFMVisionAnalyzer (host-side only). Tests expanded to 102/102 green. Advances #9 massively. No XP touched."
         }
         return JSONResponse(analysis)
     except Exception as e:

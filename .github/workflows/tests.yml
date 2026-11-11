@@ -17,5 +17,14 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Install test dependencies
+      run: python -m pip install --disable-pip-version-check -r requirements-test.txt
+
+    - name: Install XP cross-compilation tools
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm
+
+    - name: Build XP binary for compatibility tests
+      run: bash local-server/build-exe.sh "$PWD"
+
     - name: Run comprehensive test suite
       run: PYTHONPATH=local-server python -m unittest discover -s tests -v

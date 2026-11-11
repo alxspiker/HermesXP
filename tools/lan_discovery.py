@@ -72,12 +72,16 @@ class Pending:
 
 class Discovery(asyncio.DatagramProtocol):
     def __init__(self, *, devices=read_registry, save=save_registry, resolve=own_ip_for,
-                 restart=None, reconfigure=None):
+                 restart=None, reconfigure=None, notify_update=None):
         self.devices = devices
         self.save = save
         self.resolve = resolve
         self.restart = restart or restart_bridge
         self.reconfigure = reconfigure or reconcile_host_ip
+        # Authenticated returns wake the updater immediately; the periodic
+        # timer remains a fallback when discovery packets are lost.
+        self.notify_update = notify_update
+        self.last_update_notice: dict[str, float] = {}
         self.transport = None
         self.pending: dict[tuple[str, int], Pending] = {}
         self.current_hosts: dict[str, str] = {}
@@ -153,6 +157,14 @@ class Discovery(asyncio.DatagramProtocol):
         # Reconnect resets a call that cannot survive that interface move.
         if previous != ip or current_host not in (None, pending.host_ip) or host_reconfigured:
             self.restart()
+        if self.notify_update is not None:
+            now = time.monotonic()
+            if now - self.last_update_notice.get(device_id, float("-inf")) >= 300:
+                self.last_update_notice[device_id] = now
+                try:
+                    self.notify_update()
+                except (OSError, subprocess.SubprocessError) as exc:
+                    LOG.warning("Unable to trigger queued XP update: %s", type(exc).__name__)
 
 
 def reconcile_host_ip(host_ip: str, home: Path | None = None) -> bool:
@@ -302,10 +314,20 @@ def restart_bridge():
         LOG.warning("Bridge restart failed: %s", exc)
 
 
+def trigger_update():
+    """Queue the reviewed plugin's updater after an authenticated XP return."""
+    subprocess.Popen(
+        ["systemctl", "--user", "start", "--no-block", "hermes-xp-update.service"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 async def serve():
     loop = asyncio.get_running_loop()
     transport, _protocol = await loop.create_datagram_endpoint(
-        Discovery, local_addr=("0.0.0.0", PORT),
+        lambda: Discovery(notify_update=trigger_update),
+        local_addr=("0.0.0.0", PORT),
     )
     try:
         await asyncio.Event().wait()

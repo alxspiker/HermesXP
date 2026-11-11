@@ -2,9 +2,13 @@
 Description=Retry queued HermesXP LAN updates when XP devices return online
 
 [Timer]
-OnBootSec=3min
-OnUnitInactiveSec=15min
-RandomizedDelaySec=30
+OnBootSec=2min
+# The authenticated UDP discovery handshake can wake the updater immediately,
+# but some XP Wi-Fi networks drop broadcasts. Poll cheaply from verified
+# cached artifacts so an offline laptop coming back online catches up even
+# without discovery (and without Internet access on XP).
+OnUnitInactiveSec=1min
+RandomizedDelaySec=10
 Unit=hermes-xp-update.service
 
 [Install]

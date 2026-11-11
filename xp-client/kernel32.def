@@ -29,6 +29,7 @@ EXPORTS
  _GetCurrentThreadId@0=GetCurrentThreadId
  _WritePrivateProfileStringA@16=WritePrivateProfileStringA
  _GetWindowsDirectoryA@8=GetWindowsDirectoryA
+ _GetEnvironmentVariableA@12=GetEnvironmentVariableA
  _GetExitCodeProcess@8=GetExitCodeProcess
  _CreateThread@24=CreateThread
  _CreateDirectoryA@8=CreateDirectoryA

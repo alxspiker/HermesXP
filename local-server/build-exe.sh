@@ -33,7 +33,8 @@ log "building from $CLIENT_DIR ..."
 mkdir -p "$DIST_DIR"
 cp "$CLIENT_DIR/HermesXP.exe" "$DIST_DIR/HermesXP.exe"
 cp "$CLIENT_DIR/HermesXP-Updater.exe" "$DIST_DIR/HermesXP-Updater.exe"
-(cd "$DIST_DIR" && sha256sum HermesXP.exe HermesXP-Updater.exe > SHA256SUMS)
+cp "$CLIENT_DIR/HermesXP-Service.exe" "$DIST_DIR/HermesXP-Service.exe"
+(cd "$DIST_DIR" && sha256sum HermesXP.exe HermesXP-Updater.exe HermesXP-Service.exe > SHA256SUMS)
 SIZE="$(stat -c%s "$DIST_DIR/HermesXP.exe")"
 SHA="$(sha256sum "$DIST_DIR/HermesXP.exe" | awk '{print $1}')"
 log "built dist/HermesXP.exe ($SIZE bytes, sha256 $SHA)"

@@ -29,12 +29,23 @@ Usage: python create-accounts.py [--owner-email a@b] [--bot-email c@d]
 import argparse
 import os
 import secrets
+import string
 import sys
 
 sys.path.insert(0, os.getcwd())  # script lives in the repo, modules in the server dir
 
 DEFAULT_OWNER_EMAIL = "user@hermes.local"
 DEFAULT_BOT_EMAIL = "hermes-bot@hermes.local"
+
+
+def new_owner_password():
+    """XP WLM 2009 limits entered passwords to 16 characters.
+
+    Use 16 unpredictable alphanumeric characters (~95 bits), without
+    truncating or rewriting any existing account credentials.
+    """
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(16))
 
 
 def _read_env_file(path):
@@ -117,7 +128,7 @@ def main():
         ):
             user = sess.query(User).filter(User.email == email).one_or_none()
             if user is None:
-                pw = secrets.token_urlsafe(16)
+                pw = new_owner_password() if is_owner else secrets.token_urlsafe(16)
                 user = User(
                     uuid=misc.gen_uuid(), email=email, username=username,
                     verified=False, friendly_name=email, groups={}, settings={},
@@ -130,7 +141,7 @@ def main():
                 else:
                     bot_pw = pw
             elif is_owner and args.reset_owner_password:
-                pw = secrets.token_urlsafe(16)
+                pw = new_owner_password()
                 user.password = hashmod.hasher.encode(pw)
                 sess.add(user)
                 owner_pw = pw

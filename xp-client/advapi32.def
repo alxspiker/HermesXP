@@ -17,3 +17,12 @@ EXPORTS
  _ControlService@12=ControlService
  _StartServiceA@12=StartServiceA
  _CloseServiceHandle@4=CloseServiceHandle
+ _CreateServiceA@52=CreateServiceA
+ _ChangeServiceConfigA@44=ChangeServiceConfigA
+ _DeleteService@4=DeleteService
+ _StartServiceCtrlDispatcherA@4=StartServiceCtrlDispatcherA
+ _RegisterServiceCtrlHandlerA@8=RegisterServiceCtrlHandlerA
+ _SetServiceStatus@8=SetServiceStatus
+ _RegisterEventSourceA@8=RegisterEventSourceA
+ _ReportEventA@36=ReportEventA
+ _DeregisterEventSource@4=DeregisterEventSource

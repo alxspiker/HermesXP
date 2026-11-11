@@ -21,10 +21,12 @@ class TestAuthenticatedLanDiscovery(unittest.TestCase):
         self.save = Mock(side_effect=self._save)
         self.restart = Mock()
         self.reconfigure = Mock(return_value=False)
+        self.notify_update = Mock()
         self.discovery = Discovery(devices=lambda: copy.deepcopy(self.saved),
                                    save=self.save,
                                    resolve=lambda ip: "192.168.5.8",
-                                   restart=self.restart, reconfigure=self.reconfigure)
+                                   restart=self.restart, reconfigure=self.reconfigure,
+                                   notify_update=self.notify_update)
         self.transport = Mock()
         self.discovery.connection_made(self.transport)
 
@@ -53,12 +55,24 @@ class TestAuthenticatedLanDiscovery(unittest.TestCase):
         self.assertEqual(self.saved[0]["host"], "192.168.5.92")
         self.save.assert_called_once()
         self.restart.assert_called_once()
+        self.notify_update.assert_called_once()
         self.assertEqual(self.saved[0]["token"], TOKEN)
 
     def test_same_address_never_restarts_bridge(self):
         self.handshake("192.168.5.22")
         self.save.assert_not_called()
         self.restart.assert_not_called()
+        self.notify_update.assert_called_once()
+
+    def test_repeated_authenticated_heartbeats_are_throttled(self):
+        self.handshake()
+        self.notify_update.assert_called_once()
+        self.handshake()
+        self.notify_update.assert_called_once()
+        with patch("tools.lan_discovery.time.monotonic", return_value=10**10):
+            self.handshake()
+        self.notify_update.assert_called()
+        self.assertEqual(self.notify_update.call_count, 2)
 
     def test_invalid_mac_cannot_move_device(self):
         request = f"HXP1 {identity(TOKEN)} 1122334455667788"

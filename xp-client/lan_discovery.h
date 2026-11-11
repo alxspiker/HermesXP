@@ -131,7 +131,7 @@ static int hxp_update_hosts(const char *server_ip) {
   CloseHandle(file);return ok&&write_len==(DWORD)pos;}
 }
 static void hxp_apply_verified_host(const char *host) {
- char dir[512],ini[512],old[32],msn[512];int changed;
+ char dir[512],ini[512],old[32],msn[512],folder[512],programfiles[512];int changed;
  exe_dir(dir,sizeof(dir));join_path(ini,dir,"hermesxp.ini");
  GetPrivateProfileStringA("Hermes","ServerIP","",old,sizeof(old),ini);
  changed=!str_eq(old,host);
@@ -150,10 +150,14 @@ static void hxp_apply_verified_host(const char *host) {
  tskill_process("msnmsgr.exe");
  tskill_process("wlcomm.exe");
  Sleep(300);
- {const char *folder="C:\\Program Files\\Windows Live\\Messenger";
-  join_path(msn,folder,"msnmsgr.exe");
-  if(file_exists(msn))ShellExecuteA(g_main_window,"open",msn,NULL,NULL,1);
+ GetPrivateProfileStringA("Hermes","MessengerDir","",folder,sizeof(folder),ini);
+ if(!folder[0]){
+  DWORD size=GetEnvironmentVariableA("ProgramFiles",programfiles,sizeof(programfiles));
+  if(!size || size>=sizeof(programfiles))return;
+  join_path(folder,programfiles,"Windows Live\\Messenger");
  }
+ join_path(msn,folder,"msnmsgr.exe");
+ if(file_exists(msn))ShellExecuteA(g_main_window,"open",msn,NULL,NULL,1);
 }
 static DWORD WINAPI hxp_discovery_worker(void *unused) {
  unsigned char wsa[512],key[32],noncebytes[8],digest[32];

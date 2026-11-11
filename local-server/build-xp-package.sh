@@ -4,6 +4,7 @@
 #
 # Contents (all generated from the live local server, nothing hardcoded):
 #   HermesXP.exe            the companion exe (probe + installer mode)
+#   HermesXP-Service.exe    low-privilege Windows XP background health service
 #   hermesxp.ini            connection config: server IP + owner address
 #   ca.pem                  the local CA (the exe installs it into Trusted Root)
 #   escargot.dll            Escargot's Switcher (downloaded at package time,
@@ -61,12 +62,15 @@ log "server $LAN_IP, owner $OWNER_EMAIL"
 if [ -n "${HERMESXP_PREBUILT_EXE:-}" ]; then
     [ -s "$HERMESXP_PREBUILT_EXE" ] || { echo "[xp-package] missing verified exe" >&2; exit 1; }
     [ -s "${HERMESXP_PREBUILT_UPDATER:-}" ] || { echo "[xp-package] missing verified rollback helper" >&2; exit 1; }
+    [ -s "${HERMESXP_PREBUILT_SERVICE:-}" ] || { echo "[xp-package] missing verified service binary" >&2; exit 1; }
     CLIENT_EXE="$HERMESXP_PREBUILT_EXE"
     CLIENT_UPDATER="$HERMESXP_PREBUILT_UPDATER"
+    CLIENT_SERVICE="$HERMESXP_PREBUILT_SERVICE"
 else
     bash "$SCRIPT_DIR/build-exe.sh" "$REPO_ROOT" || { echo "[xp-package] exe build failed" >&2; exit 1; }
     CLIENT_EXE="$REPO_ROOT/dist/HermesXP.exe"
     CLIENT_UPDATER="$REPO_ROOT/dist/HermesXP-Updater.exe"
+    CLIENT_SERVICE="$REPO_ROOT/dist/HermesXP-Service.exe"
 fi
 
 # Remove legacy staging data, which may include a previously published password.
@@ -74,6 +78,7 @@ rm -rf -- "$STAGE"
 mkdir -p "$STAGE" "$SWITCHER_DL"
 cp "$CLIENT_EXE" "$STAGE/HermesXP.exe"
 cp "$CLIENT_UPDATER" "$STAGE/HermesXP-Updater.exe"
+cp "$CLIENT_SERVICE" "$STAGE/HermesXP-Service.exe"
 
 # 2. Public connection config. Enter the password privately in Messenger.
 cat > "$STAGE/hermesxp.ini" <<EOF

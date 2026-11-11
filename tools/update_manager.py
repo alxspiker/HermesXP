@@ -95,6 +95,7 @@ def cached_images(root: Path, cache: Path) -> dict[str, bytes]:
                 if all(hashlib.sha256(data[n]).hexdigest() == state["sha256"][n] for n in ASSETS):
                     validate_binary(data["HermesXP.exe"])
                     validate_binary(data["HermesXP-Updater.exe"])
+                    validate_binary(data["HermesXP-Service.exe"])
                     print("Verified cached update artifacts", flush=True)
                     return data
         except (OSError, ValueError, KeyError, RuntimeError):
@@ -152,7 +153,8 @@ def run_update(root: Path, home: Path, *, deploy: bool = True) -> dict:
         # This only writes host-specific install packages, not source files.
         env = dict(os.environ, HERMES_HOME=str(home),
                    HERMESXP_PREBUILT_EXE=str(cache / "HermesXP.exe"),
-                   HERMESXP_PREBUILT_UPDATER=str(cache / "HermesXP-Updater.exe"))
+                   HERMESXP_PREBUILT_UPDATER=str(cache / "HermesXP-Updater.exe"),
+                   HERMESXP_PREBUILT_SERVICE=str(cache / "HermesXP-Service.exe"))
         package = home / "msn-server/xp-package/HermesXP-Setup.exe"
         if not package.is_file() or (cache / "build-state.json").stat().st_mtime > package.stat().st_mtime:
             result = subprocess.run(

@@ -1,7 +1,7 @@
 name: hermes-msn
 label: Hermes XP MSN Messenger
 kind: platform
-version: 0.7.7
+version: 0.8.0
 description: "Windows XP companion with native Messenger Call-button rendezvous, authenticated Hermes call controls, LAN recovery and MSN audio."
 provides_tools:
   - msn_call
@@ -42,6 +42,12 @@ optional_env:
     password: false
   - name: MSN_LOGIN_URL
     description: Passport login URL the bridge uses (installer default http://127.0.0.1:8081/login = local server)
+    password: false
+  - name: HERMESXP_RELEASE_REPOSITORY
+    description: Optional GitHub owner/repository containing verified release artifacts for this fork (host-only); defaults to the HermesXP upstream repository.
+    password: false
+  - name: HERMESXP_ASSET_SOURCE
+    description: Host artifact policy (auto, build, or release); auto falls back to a local compile when no matching verified release exists.
     password: false
   - name: HERMESXP_VISION_BACKEND
     description: Host dashboard screenshot inference backend (llama-cli, openai-compatible, disabled). Configure in dashboard process environment.

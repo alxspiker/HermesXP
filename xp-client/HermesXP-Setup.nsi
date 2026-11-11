@@ -49,8 +49,25 @@ Section "HermesXP application" SEC_MAIN
   SetShellVarContext all
   SetOutPath "$INSTDIR"
 
+  ; In-place reinstall/upgrade must stop the old UI before File overwrites
+  ; its running image. The updater handles unattended incremental upgrades.
+  FindWindow $0 "HermesXPMainWindow" ""
+  ${If} $0 != 0
+    SendMessage $0 16 0 0 ; WM_CLOSE
+    Sleep 650
+  ${EndIf}
+
   File "${INPUT_DIR}/HermesXP.exe"
   File "${INPUT_DIR}/HermesXP-Updater.exe"
+  ; Stop the old health service before overwriting its executable.
+  IfFileExists "$INSTDIR\HermesXP-Service.exe" 0 service_copy
+    ExecWait '"$INSTDIR\HermesXP-Service.exe" /remove' $0
+    ${If} $0 != 0
+      MessageBox MB_OK|MB_ICONSTOP "Unable to stop the existing HermesXP service (code $0)."
+      Abort
+    ${EndIf}
+service_copy:
+  File "${INPUT_DIR}/HermesXP-Service.exe"
   File "${INPUT_DIR}/README.txt"
   File "${INPUT_DIR}/ca.pem"
   File "${INPUT_DIR}/escargot.dll"
@@ -66,15 +83,48 @@ config_ready:
   CreateShortCut "$SMPROGRAMS\HermesXP\HermesXP.lnk" "$INSTDIR\HermesXP.exe"
   CreateShortCut "$SMPROGRAMS\HermesXP\Uninstall HermesXP.lnk" "$INSTDIR\Uninstall.exe"
 
+  ; Desktop input/screenshot controls must remain in the logged-in user's
+  ; session. Never launch a privileged interactive GUI from a service.
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "HermesXP" '"$INSTDIR\HermesXP.exe"'
+  ; Service runs non-interactively under the low-privilege LocalService account.
+  ExecWait '"$INSTDIR\HermesXP-Service.exe" /install' $0
+  ${If} $0 != 0
+    DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "HermesXP"
+    MessageBox MB_OK|MB_ICONSTOP "HermesXP service registration failed (code $0)."
+    Abort
+  ${EndIf}
+
   WriteRegStr HKLM "Software\HermesXP" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayName" "HermesXP"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayVersion" "0.7.7"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayVersion" "0.8.0"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "Publisher" "WM Studios"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "UninstallString" '"$INSTDIR\Uninstall.exe"'
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "DisplayIcon" "$INSTDIR\HermesXP.exe"
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "NoModify" 1
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP" "NoRepair" 1
+  ; Keep the paired control endpoint available after both normal and silent
+  ; setup. The companion is started after optional MSN integration below.
+SectionEnd
+
+; Selected by default, but the user can opt out if they only want the
+; authenticated XP companion. The action modifies already installed WLM
+; files with .bak backups, installs the explicitly bundled local CA and
+; restarts Messenger; never silently download unrelated WLM executables.
+Section "Configure installed Windows Live Messenger" SEC_MSN
+  SetShellVarContext all
+  ExecWait '"$INSTDIR\HermesXP.exe" /setup-msn' $0
+  ${If} $0 == 4
+    DetailPrint "Windows Live Messenger is not installed at the selected location; skipped MSN integration."
+  ${ElseIf} $0 != 0
+    DetailPrint "MSN integration was not completed (code $0). The HermesXP companion and service are installed."
+    ; A silent install must never be held up by an interactive error prompt.
+    IfSilent msn_component_error_done
+    MessageBox MB_OK|MB_ICONEXCLAMATION "MSN integration was not completed (code $0). HermesXP is installed; after correcting the problem, select Install for MSN in the companion."
+msn_component_error_done:
+  ${Else}
+    DetailPrint "Configured existing Windows Live Messenger for the local Hermes MSN server."
+  ${EndIf}
 SectionEnd
 
 Section "Desktop shortcut" SEC_DESKTOP
@@ -82,14 +132,28 @@ Section "Desktop shortcut" SEC_DESKTOP
   CreateShortCut "$DESKTOP\HermesXP.lnk" "$INSTDIR\HermesXP.exe"
 SectionEnd
 
+Section -LaunchCompanion
+  ; Start after MSN patching so the user sees a configured desktop companion.
+  Exec '"$INSTDIR\HermesXP.exe"'
+SectionEnd
+
 Section "Uninstall"
   SetShellVarContext all
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "HermesXP"
+  IfFileExists "$INSTDIR\HermesXP-Service.exe" 0 service_removed
+    ExecWait '"$INSTDIR\HermesXP-Service.exe" /remove' $0
+    ${If} $0 != 0
+      MessageBox MB_OK|MB_ICONSTOP "Unable to stop the HermesXP service (code $0)."
+      Abort
+    ${EndIf}
+service_removed:
   Delete "$DESKTOP\HermesXP.lnk"
   Delete "$SMPROGRAMS\HermesXP\HermesXP.lnk"
   Delete "$SMPROGRAMS\HermesXP\Uninstall HermesXP.lnk"
   RMDir "$SMPROGRAMS\HermesXP"
   Delete "$INSTDIR\HermesXP.exe"
   Delete "$INSTDIR\HermesXP-Updater.exe"
+  Delete "$INSTDIR\HermesXP-Service.exe"
   Delete "$INSTDIR\HermesXP.previous.exe"
   Delete "$INSTDIR\HermesXP.next.exe"
   Delete "$INSTDIR\README.txt"
@@ -103,3 +167,9 @@ Section "Uninstall"
   DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\HermesXP"
   DeleteRegKey HKLM "Software\HermesXP"
 SectionEnd
+
+!insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MAIN} "Installs the companion, the low-privilege background service, and sign-in startup."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_MSN} "Configures an existing Windows Live Messenger installation, with backups and the local server's certificate. No Messenger account password is bundled."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SEC_DESKTOP} "Adds a desktop shortcut for the companion."
+!insertmacro MUI_FUNCTION_DESCRIPTION_END

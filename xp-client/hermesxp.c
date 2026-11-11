@@ -1,9 +1,8 @@
 /* HermesXP connectivity companion, XP SP3 (x86). No CRT, no WMI.
-   Fully automatic setup: the installer stores the owner credential in the
-   Windows Credential Manager (CredWriteW) and sets the registry
-   DefaultMemberName, so WLM auto-signs-in on launch. No form typing, no
-   user-entered password. Install also fixes the default gateway, the hosts
-   file, the Switcher INIs and the local CA, all without manual steps. */
+   Setup can configure an existing Messenger installation and the supplied
+   local CA. When valid owner credentials are explicitly configured they are
+   stored in Credential Manager; the public package contains no secrets.
+   Setup does not alter the Windows default gateway or fabricate passwords. */
 typedef void *HANDLE; typedef void *HINSTANCE; typedef void *HWND; typedef void *HICON;
 typedef void *HCURSOR; typedef void *HBRUSH; typedef unsigned long DWORD; typedef unsigned int UINT;
 typedef long LONG; typedef unsigned long ULONG; typedef unsigned long WPARAM; typedef long LPARAM;
@@ -142,6 +141,7 @@ IMPORT HANDLE WINAPI OpenEventA(DWORD,BOOL,const char *);
 IMPORT BOOL WINAPI SetEvent(HANDLE);
 IMPORT HANDLE WINAPI CreateMutexA(void *,BOOL,const char *);
 IMPORT UINT WINAPI GetWindowsDirectoryA(char *,UINT);
+IMPORT DWORD WINAPI GetEnvironmentVariableA(const char *,char *,DWORD);
 IMPORT HANDLE WINAPI CreateThread(void *,DWORD,void *,void *,DWORD,DWORD *);
 IMPORT BOOL WINAPI CreateDirectoryA(const char *,void *);
 IMPORT const char *WINAPI GetCommandLineA(void);
@@ -309,6 +309,7 @@ static char g_owner[100];
 static char g_ownerPw[100];
 static char g_contactsDir[512];
 static char g_serverIp[100];
+static char g_programFiles[512];
 
 /* --- XP-side installer: puts the connection files in place so WLM can use
    the local server, and patches both Messenger exes to import escargot.dll
@@ -336,14 +337,6 @@ static const char *str_find(const char *hay,const char *needle){
  int nl=strlen0(needle); if(!nl) return hay;
  for(int i=0;hay[i];i++){ int j=0; while(j<nl && hay[i+j]==needle[j]) j++; if(j==nl) return hay+i; }
  return NULL;
-}
-/* Copy the "a.b.c." prefix (through the last dot) of an IPv4 address. */
-static void prefix24(const char *ip,char *out){
- int last=-1; int i=0;
- while(ip[i]){ if(ip[i]=='.') last=i; i++; }
- if(last<0){ out[0]=0; return; }
- for(i=0;i<=last;i++) out[i]=ip[i];
- out[last+1]=0;
 }
 /* --- PE import-table patcher: add an import of <dll>!<func> to a PE32 exe.
    Appends a new section holding a rebuilt import directory (old descriptors
@@ -564,18 +557,6 @@ static int set_default_member(const char *email){
  RegCloseKey(hKey);
  return rc==0?1:0;
 }
-/* Generate a random 16-char alphanumeric password via CryptGenRandom.
-   Returns 1 on success. */
-static int gen_password(char *out){
- void *prov=NULL; unsigned char rnd[16]; int i;
- static const char alpha[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
- if(!CryptAcquireContextA(&prov,NULL,NULL,PROV_RSA_FULL,CRYPT_VERIFYCONTEXT)) return 0;
- if(!CryptGenRandom(prov,16,rnd)){ CryptReleaseContext(prov,0); return 0; }
- CryptReleaseContext(prov,0);
- for(i=0;i<16;i++) out[i]=alpha[rnd[i]%62];
- out[16]=0;
- return 1;
-}
 /* Install the local CA into Trusted Root. The old CryptoAPI-only path
    reported success while the cert never landed, so this version verifies
    the install the same way the .NET X509Store approach does (caadd2.cs):
@@ -615,49 +596,6 @@ static int install_ca(const char *pemPath){
  }
  CertFreeCertificateContext(ctx);
  return ok;
-}
-/* Find the LAN adapter on the same /24 as the server IP. Fills ip/mask/gw
-   (gw is "0.0.0.0" or empty when no gateway is set). Returns 1 if found. */
-static int find_lan_adapter(const char *serverIp,char *ipOut,char *maskOut,char *gwOut){
- char pre[32]; DWORD size=0; void *buf=NULL; int found=0;
- prefix24(serverIp,pre);
- if(!pre[0]) return 0;
- GetAdaptersInfo(NULL,&size);
- if(size<sizeof(IP_ADAPTER_INFO) || size>65536) return 0;
- buf=HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,size);
- if(!buf) return 0;
- if(GetAdaptersInfo(buf,&size)!=0){ HeapFree(GetProcessHeap(),0,buf); return 0; }
- { IP_ADAPTER_INFO *a=(IP_ADAPTER_INFO*)buf;
-   while(a && !found){
-    char apre[32]; prefix24(a->IpAddressList.IpAddress,apre);
-    if(apre[0] && str_eq(apre,pre)){
-     int i=0; while(a->IpAddressList.IpAddress[i] && i<15){ ipOut[i]=a->IpAddressList.IpAddress[i]; i++; } ipOut[i]=0;
-     i=0; while(a->IpAddressList.IpMask[i] && i<15){ maskOut[i]=a->IpAddressList.IpMask[i]; i++; } maskOut[i]=0;
-     i=0; while(a->GatewayList.IpAddress[i] && i<15){ gwOut[i]=a->GatewayList.IpAddress[i]; i++; } gwOut[i]=0;
-     found=1;
-    }
-    a=a->Next;
-   } }
- HeapFree(GetProcessHeap(),0,buf);
- return found;
-}
-/* Fix a blank default gateway, only if one is missing. The gateway is the
-   .1 of the server's /24. Never overwrites an existing gateway.
-   Returns 0 failed/unknown, 1 already set, 2 set by installer. */
-static int fix_gateway(const char *serverIp){
- static char ip[16], mask[16], gw[16], pre[32], cmd[220];
- int i=0, k=0;
- if(!find_lan_adapter(serverIp,ip,mask,gw)) return 0;
- if(gw[0] && !str_eq(gw,"0.0.0.0")) return 1; /* a gateway is already set */
- prefix24(serverIp,pre);
- if(!pre[0]) return 0;
- { const char *t="netsh interface ip set address \"Local Area Connection\" static ";
-   while(t[k]){ cmd[k]=t[k]; k++; } }
- i=0; while(ip[i]){ cmd[k++]=ip[i++]; } cmd[k++]=' ';
- i=0; while(mask[i]){ cmd[k++]=mask[i++]; } cmd[k++]=' ';
- i=0; while(pre[i]){ cmd[k++]=pre[i++]; } cmd[k++]='1'; cmd[k++]=' ';
- cmd[k++]='1'; cmd[k]=0;
- return run_wait(cmd)==0?2:0;
 }
 /* Ensure the hosts file maps msn.local and g.msn.com to the server IP.
    XP SChannel does not validate an IP against a cert, so the hostname must
@@ -705,11 +643,14 @@ static int rewrite_switcher_ini(const char *iniPath){
  return (a && b)?1:0;
 }
 #include "lan_discovery.h"
-static void do_install(HWND owner){
+/* Called by the optional installer's MSN component with silent=1, or by
+   the existing repair button with silent=0. No unverified password is ever
+   generated for an account hosted on another machine. */
+static int do_install(HWND owner,int silent){
  char dir[512], ini[512], msnDir[512], src[512], dst[512], cmd[512], done[1200];
- char host[100], pwNote[200];
+ char host[100];
  int n=0, dll=0, ini1=0, ini2=0, ca=0, launched=0, p1=0, p2=0;
- int cred=0, dmem=0, gw=0, hosts=0, rw1=0, rw2=0, pwGen=0, pwBad=0;
+ int cred=0, dmem=0, hosts=0, rw1=0, rw2=0, pwBad=0;
  unsigned char si[68]; unsigned char pi[16]; int i;
  exe_dir(dir,sizeof(dir));
  join_path(ini,dir,"hermesxp.ini");
@@ -717,44 +658,48 @@ static void do_install(HWND owner){
     can type it there); fall back to the ini. No stale hardcoded default. */
  GetWindowTextA(g_host,host,sizeof(host));
  if(!host[0]) GetPrivateProfileStringA("Hermes","ServerIP","",host,sizeof(host),ini);
- if(!host[0]){ update_status("Enter the Hermes host IPv4 address first."); return; }
+ if(!host[0]){ update_status("Configure the Hermes host IPv4 address first."); return 2; }
  { int j=0; while(host[j] && j<90){ g_serverIp[j]=host[j]; j++; } g_serverIp[j]=0; }
  GetPrivateProfileStringA("Hermes","OwnerEmail","user@hermes.local",g_owner,sizeof(g_owner),ini);
  GetPrivateProfileStringA("Hermes","OwnerPassword","",g_ownerPw,sizeof(g_ownerPw),ini);
  if(!g_owner[0]){ const char *d="user@hermes.local"; int j=0; while(d[j]){ g_owner[j]=d[j]; j++; } g_owner[j]=0; }
- /* Password rules: WLM 2009 truncates at 16 chars, so a longer password can
-    never sign in. Refuse it (never truncate); generate a fresh 16-char one
-    only when the ini password is empty, and write it back to the ini. */
- if(!g_ownerPw[0]){
-  if(gen_password(g_ownerPw)){
-   WritePrivateProfileStringA("Hermes","OwnerPassword",g_ownerPw,ini);
-   pwGen=1;
-  }
- } else if(strlen0(g_ownerPw)>16){
+ /* A generated password cannot authenticate against the independently
+    provisioned host account. Preserve existing credentials, but never
+    fabricate a new one in the public installer. A legacy password longer
+    than 16 characters must not abort all MSN setup: it may belong to an
+    already signed-in account. Do not try storing/truncating it. */
+ if(g_ownerPw[0] && strlen0(g_ownerPw)>16){
   pwBad=1;
  }
- if(pwBad){
-  update_status("OwnerPassword in hermesxp.ini is over 16 chars. Fix it and run Install again.");
-  MessageBoxA(owner,"The OwnerPassword in hermesxp.ini is longer than 16 characters.\n\nWLM 2009 truncates passwords at 16 characters, so a longer password can never sign in. Shorten it to 16 characters or less (or delete it to let the installer generate one), then run Install again.","Hermes XP install",MB_OK|MB_ICONWARNING);
-  return;
+ /* Messenger and Contacts can be installed anywhere. Resolve the Windows
+    ProgramFiles folder rather than assuming a drive or a local language.
+    (File-scope scratch avoids large Windows XP thread stack frames.) */
+ GetPrivateProfileStringA("Hermes","MessengerDir","",msnDir,sizeof(msnDir),ini);
+ GetPrivateProfileStringA("Hermes","ContactsDir","",g_contactsDir,sizeof(g_contactsDir),ini);
+ if(!msnDir[0] || !g_contactsDir[0]){
+  DWORD count=GetEnvironmentVariableA("ProgramFiles",g_programFiles,sizeof(g_programFiles));
+  if(!count || count>=sizeof(g_programFiles)) {
+   update_status("ProgramFiles is missing; set MessengerDir and ContactsDir.");
+   return 4;
+  }
  }
- /* Messenger install locations (WLM 2009 defaults). wlcomm.exe lives in
-    Contacts, not Messenger, and the Switcher files must sit next to it.
-    (g_contactsDir is file-scope so do_install's stack stays under 4K.) */
- {const char *d="C:\\Program Files\\Windows Live\\Messenger"; int j=0; while(d[j]){msnDir[j]=d[j];j++;} msnDir[j]=0;}
- {const char *d="C:\\Program Files\\Windows Live\\Contacts"; int j=0; while(d[j]){g_contactsDir[j]=d[j];j++;} g_contactsDir[j]=0;}
+ if(!msnDir[0]) {
+  join_path(msnDir,g_programFiles,"Windows Live\\Messenger");
+ }
+ if(!g_contactsDir[0]) {
+  join_path(g_contactsDir,g_programFiles,"Windows Live\\Contacts");
+ }
  join_path(dst,msnDir,"msnmsgr.exe");
- if(!file_exists(dst)){update_status("Messenger not found at the usual location.");return;}
+ if(!file_exists(dst)){update_status("Messenger not installed; configure MessengerDir if needed.");return 4;}
  update_status("Installing Hermes XP files...");
  /* Automatic sign-in, no form typing: store the credential in the Windows
     Credential Manager and set the registry DefaultMemberName. WLM reads
     both on launch and signs in on its own. */
- if(g_owner[0] && g_ownerPw[0]){
+ if(g_owner[0] && g_ownerPw[0] && !pwBad){
   cred=store_credential(g_owner,g_ownerPw);
   dmem=set_default_member(g_owner);
  }
- /* Network setup the installer now owns: gateway, hosts, Switcher INIs. */
- gw=fix_gateway(g_serverIp);
+ /* Do not rewrite Windows network adapters or guess a default gateway. */
  hosts=fix_hosts(g_serverIp);
  join_path(src,dir,"escargot.dll"); join_path(dst,msnDir,"escargot.dll");
  if(file_exists(src)) dll=CopyFileA(src,dst,0);
@@ -788,9 +733,6 @@ static void do_install(HWND owner){
  else {const char *s="- MSN credential NOT stored (check the account and password)\n"; while(*s) done[n++]=*s++;}
  if(dmem){const char *s="- Default sign-in account set in the registry\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- Default sign-in account NOT set in the registry\n"; while(*s) done[n++]=*s++;}
- if(gw==1){const char *s="- Default gateway already set (left alone)\n"; while(*s) done[n++]=*s++;}
- else if(gw==2){const char *s="- Default gateway was blank, set to the LAN gateway\n"; while(*s) done[n++]=*s++;}
- else {const char *s="- Default gateway NOT checked (could not read the adapter)\n"; while(*s) done[n++]=*s++;}
  if(hosts==1){const char *s="- Hosts file already maps msn.local\n"; while(*s) done[n++]=*s++;}
  else if(hosts==2){const char *s="- Hosts file updated (msn.local, g.msn.com)\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- Hosts file NOT updated (could not write it)\n"; while(*s) done[n++]=*s++;}
@@ -806,18 +748,25 @@ static void do_install(HWND owner){
  else {const char *s="- msnmsgr.exe NOT patched (close Messenger and run Install again)\n"; while(*s) done[n++]=*s++;}
  if(p2==1||p2==2){const char *s="- wlcomm.exe patched to load escargot.dll\n"; while(*s) done[n++]=*s++;}
  else {const char *s="- wlcomm.exe NOT patched (close Messenger and run Install again)\n"; while(*s) done[n++]=*s++;}
- if(pwGen){
-  int j=0,k=0; const char *a="\nGenerated MSN password (also saved in hermesxp.ini):\n";
-  while(a[j]){ pwNote[j]=a[j]; j++; }
-  k=0; while(g_ownerPw[k] && j<180){ pwNote[j++]=g_ownerPw[k++]; }
-  pwNote[j]=0;
-  {const char *s="\nSet this same password as HERMES_MSN_OWNER_PASSWORD on the Hermes host, or the server will reject the sign-in.\n"; int q=0; while(s[q] && j<195){ pwNote[j++]=s[q++]; } pwNote[j]=0;}
-  {const char *s=pwNote; while(*s && n<1150) done[n++]=*s++;}
+ if(!g_ownerPw[0]){
+  const char *s="\nNo account password was bundled. Sign in with your host-created MSN account credentials.";
+  while(*s && n<1150) done[n++]=*s++;
  }
- {const char *s="\nDone. Messenger signs in on its own — pick the bot and start talking."; while(*s) done[n++]=*s++;}
+ if(pwBad){
+  const char *s="\nExisting MSN password exceeds 16 characters; not changed or imported. Existing sign-in credentials remain untouched.";
+  while(*s && n<1150) done[n++]=*s++;
+ }
+ {const char *s="\nMessenger integration complete."; while(*s && n<1150) done[n++]=*s++;}
  done[n]=0;
- update_status("Install finished. See the summary.");
- MessageBoxA(owner,done,"Hermes XP install",MB_OK|MB_ICONINFORMATION);
+ if(!dll || !ini1 || !ini2 || !rw1 || !rw2 || !ca ||
+    !(p1==1 || p1==2) || !(p2==1 || p2==2) || !hosts){
+  update_status("MSN setup incomplete; check missing components and retry.");
+  if(!silent)MessageBoxA(owner,done,"Hermes XP install",MB_OK|MB_ICONWARNING);
+  return 5;
+ }
+ update_status("MSN integration complete.");
+ if(!silent)MessageBoxA(owner,done,"Hermes XP install",MB_OK|MB_ICONINFORMATION);
+ return 0;
 }
 /* --- Screenshot and remote UI listener on port 18768. All HTTP actions
    require the 64-hex X-Hermes-Token and an IPv4 source matching
@@ -1245,14 +1194,14 @@ static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
   add("BUTTON","Refresh status",WS_TABSTOP,246,235,144,27,h,115);
   refresh_network_status();
   SetTimer(h,1,15000,NULL);
-  g_status=add("STATIC","Ready. Test only: remote controls are disabled.",0,18,270,383,24,h,104);
+  g_status=add("STATIC","Authenticated remote controls are available when paired.",0,18,270,383,24,h,104);
   if(!g_remote_token[0] || !g_remote_allowed_ip[0]) update_status("Remote UI locked; configure [Remote] Token and AllowedHostIP.");
   add("STATIC","Voice calls run inside Messenger using Hermes Talk on the server.",0,18,302,390,35,h,105);
   add("STATIC","Windows XP SP3  |  32-bit  |  HermesXP",0,18,358,390,22,h,106);
   return 0;
  }
  if(msg==WM_COMMAND && (w&0xFFFF)==103){probe(h);return 0;}
- if(msg==WM_COMMAND && (w&0xFFFF)==107){do_install(h);return 0;}
+ if(msg==WM_COMMAND && (w&0xFFFF)==107){do_install(h,0);return 0;}
  if(msg==WM_COMMAND && (w&0xFFFF)==109){
   if(take_screenshot()) update_status("Screenshot saved to C:\\HermesXP\\screenshot.bmp");
   else update_status("Screenshot failed.");
@@ -1304,6 +1253,16 @@ void WINAPI WinMainCRTStartup(void){
  h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP Companion",WS_OVERLAPPEDWINDOW,80,80,426,440,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
  g_main_window=h;
+ /* NSIS selected the MSN integration component. Execute its already
+    installed files in the current elevated session, without launching an
+    unauthenticated listener or displaying a second setup wizard. */
+ {const char *cl=GetCommandLineA();
+  if(cl && str_find(cl,"/setup-msn")){
+   int result=do_install(h,1);
+   DestroyWindow(h);
+   ExitProcess(result);
+  }
+ }
  /* Updater candidate validation: load all DLLs, create the custom window,
     initialize controls, and exit cleanly without opening any listening ports,
     installing any certificates, or changing system settings. */

@@ -44,7 +44,7 @@ from pathlib import Path
 from tools.hermesxp_update import validate_binary
 from tools.release_assets import write_release_manifest
 root=Path('dist')
-for name in ('HermesXP.exe','HermesXP-Updater.exe'):
+for name in ('HermesXP.exe','HermesXP-Updater.exe','HermesXP-Service.exe'):
     validate_binary((root/name).read_bytes())
 print('Release manifest:',write_release_manifest(root,sys.argv[1],sys.argv[2]))
 PY
@@ -61,7 +61,7 @@ test "$(git rev-parse "$TAG^{}")" = "$COMMIT" || {
 git push origin "refs/tags/$TAG"
 if ! gh release view "$TAG" -R alxspiker/HermesXP >/dev/null 2>&1; then
   gh release create "$TAG" \
-    dist/HermesXP.exe dist/HermesXP-Updater.exe \
+    dist/HermesXP.exe dist/HermesXP-Updater.exe dist/HermesXP-Service.exe \
     dist/SHA256SUMS dist/RELEASE.json \
     --verify-tag --draft --title "HermesXP $TAG" \
     --notes "Generic Windows XP SP3 x86 binaries, no host credentials or machine-specific certificates. Use the authenticated LAN updater on Hermes."

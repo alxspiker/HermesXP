@@ -8,6 +8,12 @@ accounts = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(accounts)
 
 class AccountSetupTests(unittest.TestCase):
+    def test_owner_password_is_wlm_2009_compatible_and_random(self):
+        passwords = [accounts.new_owner_password() for _ in range(8)]
+        for password in passwords:
+            self.assertEqual(len(password), 16)
+            self.assertTrue(password.isascii() and password.isalnum())
+        self.assertEqual(len(set(passwords)), len(passwords))
     def test_bridge_token_is_created_and_reused(self):
         token = accounts.bridge_token({})
         self.assertGreaterEqual(len(token), 64)

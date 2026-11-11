@@ -463,6 +463,7 @@ The XP companion is **not an independent LLM runtime**. It provides an authentic
 | Root `plugin.yaml`, `adapter.py` and `__init__.py` | Hermes host, Python | Full Git-backed Hermes plugin; updates through `hermes plugins update hermes-msn` |
 | `tools/update_manager.py`, `tools/hermesxp_update.py` | Hermes host, Python | Verifies releases or builds locally and distributes authenticated updates to paired XP machines |
 | `dist/HermesXP-Updater.exe` | Windows XP SP3 x86 | Separate restart-and-rollback helper |
+| `dist/HermesXP-Service.exe` | Windows XP SP3 x86 | Noninteractive LocalService health monitor installed by Setup; desktop companion starts at user sign-in |
 | `msn-bridge/bridge.js` | Hermes host, Node 18+ | Connects MSN bot to Hermes via authenticated localhost JSON-lines |
 | `msn-bridge/msnclient/` | Hermes host, Node | Patched copy of tutmonde/msnclient (GPLv3) — server host/login URL come from env, see `LOCAL-PATCH.md` |
 | `local-server/install.sh` | Hermes host, bash | One-time installer: downloads msn-server, creates accounts, starts services, sets up TLS |
@@ -545,7 +546,7 @@ Run the installer on the Hermes host as the account that runs Hermes. It is idem
 
 3. **The installer prints the owner password ONCE** (`OWNER_PASSWORD_FOR_WLM=...`). Give it to the person who will type it into WLM on the XP. It is never written to a file.
 4. Restart the Hermes gateway so the `hermes_msn` platform connects (the adapter health-checks 127.0.0.1:1863 and logs a clear error if the server is down).
-5. On XP: run `HermesXP-Setup.exe` from the trusted LAN package directory (or transfer it over USB), then launch HermesXP from the Start menu and click **Install for MSN**. The button places `escargot.dll` and both Switcher INIs next to Messenger, installs the local CA into Trusted Root, patches both Messenger exes to load the Switcher at startup (originals backed up as `.bak`), and launches Messenger. The portable ZIP is available for troubleshooting.
+5. On XP: run `HermesXP-Setup.exe` from the trusted LAN package directory (or transfer it over USB). The **Configure installed Windows Live Messenger** component is selected by default; it places `escargot.dll` and both Switcher INIs next to an existing Windows Live Messenger installation, installs the bundled local CA, patches both Messenger executables to load the Switcher (backing up originals as `.bak`), and launches Messenger. It never downloads or redistributes Microsoft's client. The user may deselect MSN integration. The **Install for MSN** button remains available to repair or retry after correcting prerequisites. No account passwords are included in the package; users sign in to their existing host-created account. The portable ZIP is available for troubleshooting.
    - Sign in to WLM as `user@hermes.local` (or your configured owner address) with the printed password. The bot (`hermes-bot@hermes.local`) is already in your contacts — pick it and send it a message. Only the configured owner address is allowed through the bridge into Hermes. The Hermes gateway itself must be running.
 6. Verify: `systemctl --user status msn-server.service msn-tls.service hermes-msn-bridge.service`, and check the gateway log shows the platform connected and the bridge logged in.
 7. Optional custom content, host-side only. Set any of these before the bridge starts. Nothing is invented if they are unset. Re-run `install.sh` (it applies `patch-server.py`) and restart `msn-server` before expecting WLM to fetch the restored tile URLs; this repo change does not restart the service.
@@ -564,7 +565,11 @@ Run the installer on the Hermes host as the account that runs Hermes. It is idem
 - The XP probe is **unencrypted and unauthenticated** by design, and only exchanges a machine name and OK/BAD result. It does not grant device control or prove identity. Never treat a positive response as pairing.
 - The MSN bridge is plaintext **loopback-only** and protected with a long shared token. Do not expose port 18764 to the LAN or internet. File bytes stay on that switchboard path and in `~/.hermes/msn-transfers`; they are not a remote-exec channel and are not live-verified on XP.
 - User address filtering is applied in both Node and Python. Other Messenger contacts cannot submit agent messages through this code, but the public MSN service is a separate trust boundary.
-- No remote code execution, auto-installation, service installation, file modification or Windows Registry edits in this prototype.
+- The companion cannot execute arbitrary shell commands or install arbitrary
+  Windows services. The signed-in desktop companion does have bounded,
+  authenticated screen/input/update and named Windows-service control APIs.
+  The **installer** registers HermesXP's own background health service and
+  user-login startup entry; it requires administrator permission.
 - Nothing here bypasses XP security support end-of-life or fixes its browser/TLS stack.
 - XP executable is cross-compiled, PE32/Windows 5.01 verified, but not run/tested on a Windows XP installation.
 - To uninstall the Windows companion, use Control Panel → Add or Remove Programs → HermesXP. This does not remove the separate Hermes host plugin/services or automatically undo existing Messenger modifications.

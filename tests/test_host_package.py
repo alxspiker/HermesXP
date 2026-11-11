@@ -57,6 +57,7 @@ class PackageSecurityTests(unittest.TestCase):
             (repo / 'dist').mkdir(parents=True)
             (repo / 'dist/HermesXP.exe').write_bytes(b'exe')
             (repo / 'dist/HermesXP-Updater.exe').write_bytes(b'updater')
+            (repo / 'dist/HermesXP-Service.exe').write_bytes(b'service')
             fakebin = root / 'bin'
             fakebin.mkdir()
             # Skip cross compiler without touching the working checkout.

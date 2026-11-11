@@ -17,8 +17,19 @@ import urllib.request
 
 
 REPOSITORY = "alxspiker/HermesXP"
-ASSETS = ("HermesXP.exe", "HermesXP-Updater.exe")
+ASSETS = ("HermesXP.exe", "HermesXP-Updater.exe", "HermesXP-Service.exe")
 MAX_DOWNLOAD = 2 * 1024 * 1024
+
+
+def release_repository() -> str:
+    """Choose the explicitly approved release source for forks of HermesXP."""
+    repository = os.environ.get("HERMESXP_RELEASE_REPOSITORY", REPOSITORY).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}", repository):
+        raise ValueError("HERMESXP_RELEASE_REPOSITORY must be a GitHub owner/repo")
+    owner, name = repository.split("/")
+    if owner in (".", "..") or name in (".", ".."):
+        raise ValueError("HERMESXP_RELEASE_REPOSITORY must not contain path traversal segments")
+    return repository
 
 
 def _get(url: str) -> bytes:
@@ -40,7 +51,7 @@ def load_release(version: str, commit: str) -> dict[str, bytes] | None:
         raise ValueError("Invalid plugin version")
     if not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
         raise ValueError("Missing plugin source revision")
-    url = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/v{version}"
+    url = f"https://api.github.com/repos/{release_repository()}/releases/tags/v{version}"
     try:
         data = json.loads(_get(url))
     except (urllib.error.HTTPError, OSError, TimeoutError, ValueError):

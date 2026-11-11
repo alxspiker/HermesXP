@@ -20,6 +20,12 @@ class UpdateManagerTests(unittest.TestCase):
             with patch.object(sys, "argv", ["update_manager.py"]):
                 self.assertEqual(update_manager.main(), update_manager.EX_TEMPFAIL)
 
+    def test_offline_retry_timer_does_not_depend_on_xp_discovery(self):
+        timer = (ROOT / "local-server/hermes-xp-update.timer").read_text()
+        self.assertIn("OnUnitInactiveSec=1min", timer)
+        self.assertIn("Unit=hermes-xp-update.service", timer)
+        self.assertIn("RandomizedDelaySec=10", timer)
+
     def test_completed_fleet_is_successful(self):
         with patch.object(update_manager, "run_update", return_value={"RUITER": "current"}):
             with patch.object(sys, "argv", ["update_manager.py"]):
@@ -37,7 +43,7 @@ class UpdateManagerTests(unittest.TestCase):
                          (ROOT / "hermes-plugin/hermes-msn/adapter.py").read_bytes())
         self.assertEqual((ROOT / "__init__.py").read_bytes(),
                          (ROOT / "hermes-plugin/hermes-msn/__init__.py").read_bytes())
-        self.assertEqual(update_manager.plugin_version(ROOT), "0.7.7")
+        self.assertEqual(update_manager.plugin_version(ROOT), "0.8.0")
         self.assertEqual(len(update_manager.source_digest(ROOT)), 64)
 
     def test_release_manifest_contains_commit_and_digests(self):
@@ -51,6 +57,14 @@ class UpdateManagerTests(unittest.TestCase):
             self.assertEqual(data["version"], "0.3.2")
             self.assertEqual(data["commit"], commit)
             self.assertEqual(set(data["sha256"]), set(release_assets.ASSETS))
+
+    def test_release_repository_supports_forks_without_accepting_arbitrary_urls(self):
+        with patch.dict("os.environ", {"HERMESXP_RELEASE_REPOSITORY": "example/HermesXP"}):
+            self.assertEqual(release_assets.release_repository(), "example/HermesXP")
+        for invalid in ("https://example.net/plugin", "../evil", "example/repo/other"):
+            with patch.dict("os.environ", {"HERMESXP_RELEASE_REPOSITORY": invalid}):
+                with self.assertRaises(ValueError):
+                    release_assets.release_repository()
 
     def test_reject_mismatched_revision_without_trusting_release(self):
         commit = "b" * 40

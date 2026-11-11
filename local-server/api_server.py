@@ -1,11 +1,19 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, JSONResponse
-import requests
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from PIL import Image
 import io
 import os
 from datetime import datetime
+from pathlib import Path
+import sys
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+from tools.hermesxp_ui import HermesXPClient, ResponseTooLargeError
+from tools.hermesxp_update import read_registry, UpdateError
 
 app = FastAPI(title="HermesXP Vision Dashboard Server")
 
@@ -19,7 +27,76 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.7", "vision": "heuristic-only", "model": "unavailable", "cua": "simulated-only", "xp_endpoint": "screenshot-only-auth-cua-ready"}
+    return {"services": "active", "dashboard": "v0.7", "vision": "heuristic-only", "model": "unavailable", "cua": "simulated-only", "xp_endpoint": "paired-device-authenticated"}
+
+
+def resolve_paired_device(devices: list[dict], name: str | None) -> dict:
+    if not devices:
+        raise HTTPException(status_code=503, detail="No paired XP devices are configured")
+    if name is None:
+        if len(devices) != 1:
+            raise HTTPException(status_code=400, detail="Select a paired device by name")
+        return devices[0]
+    matches = [device for device in devices if device["name"] == name]
+    if not matches:
+        raise HTTPException(status_code=404, detail="Paired XP device not found")
+    if len(matches) != 1:
+        raise HTTPException(status_code=409, detail="Paired XP device name is ambiguous")
+    return matches[0]
+
+
+def fetch_paired_screenshot(name: str | None = None) -> tuple[bytes, int, int]:
+    """Fetch and validate a BMP through the private paired-device registry."""
+    try:
+        device = resolve_paired_device(read_registry(), name)
+    except HTTPException:
+        raise
+    except (OSError, ValueError, UpdateError) as exc:
+        raise HTTPException(status_code=503, detail="Paired-device registry is unavailable") from exc
+
+    try:
+        content = HermesXPClient(
+            device["host"], device["token"], port=device["port"], timeout=5.0
+        ).screenshot()
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Paired XP screenshot request timed out") from exc
+    except ResponseTooLargeError as exc:
+        raise HTTPException(status_code=502, detail="XP returned an oversized screenshot") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Paired XP device is offline or unavailable") from exc
+
+    if not content or len(content) > 32 * 1024 * 1024:
+        raise HTTPException(status_code=502, detail="XP returned an invalid or oversized screenshot")
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            if image.format != "BMP":
+                raise ValueError("not a BMP")
+            width, height = image.size
+            if not (1 <= width <= 8192 and 1 <= height <= 8192 and width * height <= 40_000_000):
+                raise ValueError("invalid image dimensions")
+            image.verify()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="XP returned an invalid screenshot") from exc
+    return content, width, height
+
+
+@app.get("/api/devices")
+def paired_devices():
+    try:
+        devices = read_registry()
+    except (OSError, ValueError, UpdateError) as exc:
+        raise HTTPException(status_code=503, detail="Paired-device registry is unavailable") from exc
+    return {"devices": [{"name": device["name"]} for device in devices]}
+
+
+@app.get("/api/screenshot")
+def screenshot(device: str | None = None):
+    content, width, height = fetch_paired_screenshot(device)
+    return Response(content=content, media_type="image/bmp", headers={
+        "X-HermesXP-Width": str(width), "X-HermesXP-Height": str(height),
+        "Cache-Control": "no-store",
+    })
+
 
 def generate_heuristic_suggestions(width: int, height: int) -> list:
     """Pure function for heuristic CUA suggestions. Testable independently.
@@ -72,22 +149,11 @@ def generate_heuristic_suggestions(width: int, height: int) -> list:
 
 
 @app.get("/api/analyze")
-async def analyze_screenshot():
-    """Host-side vision analysis for XP screenshot. Returns CUA-style suggestions. No XP commands."""
+def analyze_screenshot(device: str | None = None):
+    """Analyze a screenshot obtained through the selected paired XP device."""
     try:
-        # Fetch live screenshot (cache buster not needed here)
-        screenshot_url = "http://192.168.1.78:18768/screenshot.bmp"
-        resp = requests.get(screenshot_url, timeout=5)
-        resp.raise_for_status()
-        
-        # Real host-side analysis using PIL for size + dynamic CUA coords 
-        # Now uses extracted helper for independent testability (addresses previous inline limitation)
-        img = Image.open(io.BytesIO(resp.content))
-        width, height = img.size
+        _content, width, height = fetch_paired_screenshot(device)
         suggestions = generate_heuristic_suggestions(width, height)
-        
-        # Model integration is not implemented in this server process. Keep the
-        # output explicitly heuristic rather than inventing detections.
         analysis = {
             "status": "success",
             "analysis_mode": "heuristic",
@@ -97,8 +163,12 @@ async def analyze_screenshot():
             "note": "Heuristic coordinate estimates only; visual model integration is unavailable. Suggestions are not detected UI elements."
         }
         return JSONResponse(analysis)
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e), "note": "Screenshot endpoint unavailable - using mock for tests"})
+    except HTTPException as exc:
+        return JSONResponse({"status": "error", "message": exc.detail,
+                             "note": "Paired XP screenshot is unavailable"}, status_code=exc.status_code)
+    except Exception:
+        return JSONResponse({"status": "error", "message": "Screenshot analysis failed",
+                             "note": "Paired XP screenshot could not be analyzed"}, status_code=502)
 
 
 class CUARequestLimitMiddleware:

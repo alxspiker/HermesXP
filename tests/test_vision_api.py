@@ -1,10 +1,11 @@
 import unittest
-from unittest.mock import patch, MagicMock
-import requests
+from unittest.mock import patch
 import io
 from PIL import Image
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from api_server import app
+from tools.hermesxp_ui import HermesXPClient, ResponseTooLargeError
 
 class TestVisionAPI(unittest.TestCase):
     """Tests for host-side screenshot analysis and CUA validation."""
@@ -16,11 +17,80 @@ class TestVisionAPI(unittest.TestCase):
         image.save(buffer, format="BMP")
         return buffer.getvalue()
 
+    def test_remote_client_bounds_server_response_bytes(self):
+        with patch("tools.hermesxp_ui.http.client.HTTPConnection") as connection_class, \
+             patch("tools.hermesxp_ui._MAX_RESPONSE_BYTES", 4):
+            connection_class.return_value.getresponse.return_value.status = 200
+            connection_class.return_value.getresponse.return_value.read.return_value = b"12345"
+            client = HermesXPClient("127.0.0.1", "a" * 64)
+            with self.assertRaises(ResponseTooLargeError):
+                client.screenshot()
+            connection_class.return_value.getresponse.return_value.read.assert_called_once_with(5)
+
+    def test_screenshot_route_selects_paired_device_without_exposing_secret(self):
+        token = "a" * 64
+        devices = [
+            {"name": "XP-A", "host": "192.168.2.11", "port": 18768, "token": token},
+            {"name": "XP-B", "host": "192.168.2.12", "port": 18768, "token": "b" * 64},
+        ]
+        with patch("api_server.read_registry", return_value=devices), \
+             patch("api_server.HermesXPClient") as client_class:
+            client_class.return_value.screenshot.return_value = self.bmp_bytes(320, 200)
+            response = TestClient(app).get("/api/screenshot?device=XP-B")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["content-type"], "image/bmp")
+        self.assertEqual(response.headers["x-hermesxp-width"], "320")
+        self.assertEqual(response.headers["x-hermesxp-height"], "200")
+        self.assertNotIn("token", response.text.lower())
+        client_class.assert_called_once_with("192.168.2.12", "b" * 64, port=18768, timeout=5.0)
+
+    def test_device_list_exposes_names_but_not_pairing_tokens(self):
+        devices = [
+            {"name": "XP-A", "host": "192.168.2.11", "port": 18768, "token": "a" * 64},
+            {"name": "XP-B", "host": "192.168.2.12", "port": 18768, "token": "b" * 64},
+        ]
+        with patch("api_server.read_registry", return_value=devices):
+            response = TestClient(app).get("/api/devices")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"devices": [{"name": "XP-A"}, {"name": "XP-B"}]})
+        self.assertNotIn("token", response.text.lower())
+        self.assertNotIn("aaaa", response.text)
+
+    def test_screenshot_route_reports_missing_or_unknown_paired_device(self):
+        client = TestClient(app)
+        with patch("api_server.read_registry", return_value=[]):
+            self.assertEqual(client.get("/api/screenshot").status_code, 503)
+        devices = [{"name": "XP-A", "host": "192.168.2.11", "port": 18768, "token": "a" * 64}]
+        with patch("api_server.read_registry", return_value=devices):
+            self.assertEqual(client.get("/api/screenshot?device=not-paired").status_code, 404)
+
+    def test_screenshot_route_requires_device_when_multiple_devices_are_paired(self):
+        devices = [
+            {"name": "XP-A", "host": "192.168.2.11", "port": 18768, "token": "a" * 64},
+            {"name": "XP-B", "host": "192.168.2.12", "port": 18768, "token": "b" * 64},
+        ]
+        with patch("api_server.read_registry", return_value=devices):
+            response = TestClient(app).get("/api/screenshot")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("device", response.json()["detail"].lower())
+
+    def test_screenshot_route_reports_offline_timeout_and_invalid_image(self):
+        devices = [{"name": "XP-A", "host": "192.168.2.11", "port": 18768, "token": "a" * 64}]
+        client = TestClient(app)
+        with patch("api_server.read_registry", return_value=devices), \
+             patch("api_server.HermesXPClient") as client_class:
+            client_class.return_value.screenshot.side_effect = RuntimeError("XP unavailable")
+            self.assertEqual(client.get("/api/screenshot").status_code, 503)
+            client_class.return_value.screenshot.side_effect = TimeoutError()
+            self.assertEqual(client.get("/api/screenshot").status_code, 504)
+            client_class.return_value.screenshot.side_effect = None
+            client_class.return_value.screenshot.return_value = b"bad image"
+            self.assertEqual(client.get("/api/screenshot").status_code, 502)
+            client_class.return_value.screenshot.return_value = b"x" * (32 * 1024 * 1024 + 1)
+            self.assertEqual(client.get("/api/screenshot").status_code, 502)
+
     def test_analyze_endpoint_reports_heuristics_without_fabricated_detection(self):
-        response = MagicMock()
-        response.content = self.bmp_bytes()
-        response.raise_for_status.return_value = None
-        with patch("api_server.requests.get", return_value=response):
+        with patch("api_server.fetch_paired_screenshot", return_value=(self.bmp_bytes(), 80, 60)):
             result = TestClient(app).get("/api/analyze").json()
 
         self.assertEqual(result["status"], "success")
@@ -58,18 +128,15 @@ class TestVisionAPI(unittest.TestCase):
                 self.assertGreater(s["confidence"], 0.7)
 
     def test_analyze_endpoint_returns_error_for_unreadable_image(self):
-        response = MagicMock()
-        response.content = b"not a bitmap"
-        response.raise_for_status.return_value = None
-        with patch("api_server.requests.get", return_value=response):
+        with patch("api_server.fetch_paired_screenshot", side_effect=HTTPException(502, "invalid screenshot")):
             result = TestClient(app).get("/api/analyze").json()
         self.assertEqual(result["status"], "error")
 
     def test_analyze_endpoint_returns_error_when_screenshot_fetch_fails(self):
-        with patch("api_server.requests.get", side_effect=requests.exceptions.ConnectionError("offline")):
+        with patch("api_server.fetch_paired_screenshot", side_effect=HTTPException(503, "offline")):
             result = TestClient(app).get("/api/analyze").json()
         self.assertEqual(result["status"], "error")
-        self.assertIn("Screenshot endpoint unavailable", result["note"])
+        self.assertIn("Paired XP screenshot", result["note"])
 
     def test_cua_requires_exact_peer_and_validates_action_payload(self):
         import os

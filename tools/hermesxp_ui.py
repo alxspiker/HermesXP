@@ -17,6 +17,13 @@ _ALLOWED_KEYS = frozenset((
     "Left", "Up", "Right", "Down",
 ))
 _SERVICE_ACTIONS = frozenset(("status", "start", "stop", "restart"))
+_MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+
+class ResponseTooLargeError(RuntimeError):
+    """A paired XP response exceeded the fixed client memory limit."""
+
+
 _SERVICE_NAME = re.compile(r"[A-Za-z0-9_.+$\-](?:[A-Za-z0-9_.+$ \-]{0,78}[A-Za-z0-9_.+$\-])?\Z")
 
 
@@ -84,7 +91,9 @@ class HermesXPClient:
                 headers={"X-Hermes-Token": self.token, "Content-Length": str(len(body))},
             )
             response = connection.getresponse()
-            payload = response.read()
+            payload = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(payload) > _MAX_RESPONSE_BYTES:
+                raise ResponseTooLargeError("HermesXP response exceeds the 32 MiB limit")
             if response.status != 200:
                 raise RuntimeError(f"HermesXP returned HTTP {response.status}: {payload[:120]!r}")
             return payload
@@ -137,7 +146,9 @@ def request(
             headers={"X-Hermes-Token": client.token, "Content-Length": str(len(body))},
         )
         response = connection.getresponse()
-        payload = response.read()
+        payload = response.read(_MAX_RESPONSE_BYTES + 1)
+        if len(payload) > _MAX_RESPONSE_BYTES:
+            raise ResponseTooLargeError("HermesXP response exceeds the 32 MiB limit")
         if response.status != 200:
             raise RuntimeError(f"HermesXP returned HTTP {response.status}: {payload[:120]!r}")
         return response.getheader("Content-Type", ""), payload

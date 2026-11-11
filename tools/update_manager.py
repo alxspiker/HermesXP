@@ -53,6 +53,11 @@ def source_digest(root: Path) -> str:
         *sorted((root / "xp-client").glob("*.c")),
         *sorted((root / "xp-client").glob("*.h")),
         *sorted((root / "xp-client").glob("*.def")),
+        # The branded Windows binary embeds native resources. Updating the
+        # icon or banner without changing C must invalidate cached builds.
+        *sorted((root / "xp-client").glob("*.rc")),
+        *sorted((root / "xp-client").glob("*.ico")),
+        *sorted((root / "xp-client").glob("*.bmp")),
         root / "xp-client/build.sh",
         root / "xp-client/fix_import_names.py",
         root / "local-server/build-exe.sh",
@@ -113,8 +118,8 @@ def cached_images(root: Path, cache: Path) -> dict[str, bytes]:
     else:
         if os.environ.get("HERMESXP_ASSET_SOURCE") == "release":
             raise RuntimeError("No release matches the installed plugin revision")
-        if not all(shutil.which(tool) for tool in ("clang", "lld-link", "llvm-objdump")):
-            raise RuntimeError("No matching release; install clang, lld and llvm on the Hermes host")
+        if not all(shutil.which(tool) for tool in ("clang", "lld-link", "llvm-objdump", "llvm-rc")):
+            raise RuntimeError("No matching release; install clang, lld, llvm-objdump and llvm-rc on the Hermes host")
         with tempfile.TemporaryDirectory(prefix="hermesxp-build-") as td:
             checkout = Path(td) / "source"
             shutil.copytree(

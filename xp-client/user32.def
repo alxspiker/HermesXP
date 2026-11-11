@@ -3,6 +3,9 @@ EXPORTS
  _RegisterClassA@4=RegisterClassA
  _CreateWindowExA@48=CreateWindowExA
  _ShowWindow@8=ShowWindow
+ _SetWindowPos@28=SetWindowPos
+ _LoadIconA@8=LoadIconA
+ _LoadImageA@24=LoadImageA
  _UpdateWindow@4=UpdateWindow
  _DefWindowProcA@16=DefWindowProcA
  _GetMessageA@16=GetMessageA

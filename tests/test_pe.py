@@ -72,8 +72,44 @@ class TestPE(unittest.TestCase):
         exe=(HERE/'dist'/'HermesXP.exe').read_bytes()
         self.assertIn(b'Network Connections...',exe)
         self.assertIn(b'Refresh status',exe)
-        self.assertIn(b'Network status:',exe)
+        self.assertIn(b'CONNECTION',exe)
+        self.assertIn(b'Settings...',exe)
+        self.assertIn(b'Repair Messenger',exe)
+        self.assertIn(b'Runs automatically at Windows sign-in.',exe)
+        self.assertNotIn(b'First connection',exe)
+        self.assertNotIn(b'Install for MSN',exe)
+        self.assertNotIn(b'Screenshot saved',exe)
         self.assertNotIn(b'Scan Wi-Fi',exe)
         self.assertNotIn(b'Connect Wi-Fi',exe)
+
+    def test_compact_interface_uses_real_embedded_logo(self):
+        from PIL import Image
+        source = (HERE/'xp-client/hermesxp.c').read_text()
+        build = (HERE/'xp-client/build.sh').read_text()
+        resources = (HERE/'xp-client/hermesxp.rc').read_text()
+        image = HERE/'assets/hermesxp-logo.jpg'
+        self.assertTrue(image.exists(), 'The supplied logo must ship as an actual image')
+        with Image.open(image) as logo:
+            self.assertGreaterEqual(logo.width, 250)
+        self.assertIn('1 ICON "hermesxp.ico"', resources)
+        self.assertIn('2 BITMAP "hermesxp-banner.bmp"', resources)
+        self.assertIn('llvm-rc /FO hermesxp.res hermesxp.rc', build)
+        self.assertIn('hermesxp.obj hermesxp.res', build)
+        self.assertIn('LoadImageA(g_instance,(const char*)2,IMAGE_BITMAP', source)
+        self.assertIn('toggle_settings(HWND h)', source)
+        self.assertIn('if(msg==WM_COMMAND && (w&0xFFFF)==117)', source)
+        self.assertIn('for(int i=0;i<6;i++)ShowWindow(g_advanced[i],0)', source)
+        self.assertNotIn('add("BUTTON","Screenshot"', source)
+        self.assertNotIn('g_heading_font', source)
+
+    def test_update_cache_includes_gui_resources(self):
+        import importlib.util
+        path=HERE/'tools/update_manager.py'
+        import ast
+        module=ast.parse(path.read_text())
+        digest_fn=next(n for n in module.body if isinstance(n,ast.FunctionDef) and n.name=='source_digest')
+        text=ast.get_source_segment(path.read_text(),digest_fn)
+        for ext in ('*.rc','*.ico','*.bmp'):
+            self.assertIn(ext,text, f'{ext} should invalidate the update cache')
 
 if __name__=='__main__':unittest.main()

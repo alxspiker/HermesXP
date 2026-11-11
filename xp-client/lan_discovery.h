@@ -15,6 +15,7 @@
 #define HXP_DISCOVERY_INTERVAL_MS 8000
 static volatile DWORD hxp_discovery_status=0;
 static volatile DWORD hxp_discovery_verified=0;
+static volatile DWORD hxp_discovery_last_tick=0;
 static volatile DWORD hxp_discovery_windows_error=0;
 
 static void hxp_hex(const unsigned char *src,int size,char *dst) {
@@ -214,6 +215,7 @@ static DWORD WINAPI hxp_discovery_worker(void *unused) {
    hxp_append(message,p,sizeof(message),fields[3]);
    if(hxp_hmac(provider,key,message,mac) && remote_ct_equal(mac,fields[4],64)){
     hxp_discovery_verified++;
+    hxp_discovery_last_tick=GetTickCount();
     hxp_discovery_windows_error=0;
     /* Host registry only changes after this authenticated acknowledgement. */
     p=hxp_append(ack,0,sizeof(ack),"HXP3 ");

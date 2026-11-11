@@ -7,3 +7,4 @@ EXPORTS
  _GetDIBits@28=GetDIBits
  _DeleteDC@4=DeleteDC
  _DeleteObject@4=DeleteObject
+ _CreateFontA@56=CreateFontA

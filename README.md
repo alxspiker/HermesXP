@@ -1,5 +1,11 @@
 # HermesXP / Windows Live Messenger — Hermes Talk audio bridge
 
+![HermesXP logo](assets/hermesxp-logo.jpg)
+
+The official HermesXP logo is stored in `assets/`; its cropped XP-compatible
+icon is embedded directly into `HermesXP.exe`, so no separate image file is
+needed on Windows XP.
+
 ### Automatic address recovery (v0.7.2)
 
 Once paired, HermesXP automatically recovers from a Windows XP device
@@ -438,10 +444,12 @@ files, creates Start menu and optional desktop shortcuts, and registers
   The installer never overwrites an existing `hermesxp.ini`.
 - Launch **Start → Programs → HermesXP → HermesXP**. The app displays the
   IPv4 address assigned by Windows (updated automatically), with a
-  **Network Connections** button that opens XP's own networking control panel.
-  Connect to Wi-Fi or Ethernet using Windows XP before pairing. HermesXP does
-  not ask for, store, or manage Wi-Fi passwords. **Install for MSN** is a
-  separate button that configures Messenger and its local certificate.
+  **Refresh status** button and a compact **Settings** section. The main
+  view shows pairing, network, and Hermes host status beneath the embedded
+  HermesXP logo. Open Settings for **Test host**, **Repair Messenger**, or
+  **Network Connections** (XP's own networking control panel). Connect
+  using Windows XP before pairing. HermesXP does not ask for, store, or
+  manage Wi-Fi passwords. Messenger setup normally runs during installation.
 - Uninstall with **Add or Remove Programs**. This removes the companion and
   its shortcuts; it deliberately preserves `hermesxp.ini` and other user
   data. It does not undo the independent Messenger patch/CA installation.
@@ -494,7 +502,7 @@ HermesXP.exe on XP --> LAN port 18765 --> read-only host probe
 ## Step A: test the XP executable independently
 
 1. On the modern host run `python3 tools/probe_server.py --bind YOUR_LAN_IP` (for example, `192.168.1.20`). Restrict the host firewall port 18765/TCP to the XP device's IP only. Run this **only on a trusted or isolated LAN**.
-2. Copy `dist/HermesXP.exe` to Windows XP and launch it. Enter the modern host LAN IP and click **Test connection**.
+2. Copy `dist/HermesXP.exe` to Windows XP and launch it. Open **Settings**, enter the modern host LAN IP, and click **Test host**.
 3. It should report **Hermes host reached! Probe OK. Not yet paired.** No services are installed and no configuration is changed.
 4. Stop `probe_server.py` after testing. Do not run this alongside the plugin probe listener on the same IP/port.
 
@@ -546,7 +554,7 @@ Run the installer on the Hermes host as the account that runs Hermes. It is idem
 
 3. **The installer prints the owner password ONCE** (`OWNER_PASSWORD_FOR_WLM=...`). Give it to the person who will type it into WLM on the XP. It is never written to a file.
 4. Restart the Hermes gateway so the `hermes_msn` platform connects (the adapter health-checks 127.0.0.1:1863 and logs a clear error if the server is down).
-5. On XP: run `HermesXP-Setup.exe` from the trusted LAN package directory (or transfer it over USB). The **Configure installed Windows Live Messenger** component is selected by default; it places `escargot.dll` and both Switcher INIs next to an existing Windows Live Messenger installation, installs the bundled local CA, patches both Messenger executables to load the Switcher (backing up originals as `.bak`), and launches Messenger. It never downloads or redistributes Microsoft's client. The user may deselect MSN integration. The **Install for MSN** button remains available to repair or retry after correcting prerequisites. No account passwords are included in the package; users sign in to their existing host-created account. The portable ZIP is available for troubleshooting.
+5. On XP: run `HermesXP-Setup.exe` from the trusted LAN package directory (or transfer it over USB). The **Configure installed Windows Live Messenger** component is selected by default; it places `escargot.dll` and both Switcher INIs next to an existing Windows Live Messenger installation, installs the bundled local CA, patches both Messenger executables to load the Switcher (backing up originals as `.bak`), and launches Messenger. It never downloads or redistributes Microsoft's client. The user may deselect MSN integration. The **Settings → Repair Messenger** button remains available to repair or retry after correcting prerequisites. No account passwords are included in the package; users sign in to their existing host-created account. The portable ZIP is available for troubleshooting.
    - Sign in to WLM as `user@hermes.local` (or your configured owner address) with the printed password. The bot (`hermes-bot@hermes.local`) is already in your contacts — pick it and send it a message. Only the configured owner address is allowed through the bridge into Hermes. The Hermes gateway itself must be running.
 6. Verify: `systemctl --user status msn-server.service msn-tls.service hermes-msn-bridge.service`, and check the gateway log shows the platform connected and the bridge logged in.
 7. Optional custom content, host-side only. Set any of these before the bridge starts. Nothing is invented if they are unset. Re-run `install.sh` (it applies `patch-server.py`) and restart `msn-server` before expecting WLM to fetch the restored tile URLs; this repo change does not restart the service.

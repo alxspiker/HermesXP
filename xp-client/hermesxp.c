@@ -10,14 +10,24 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define WINAPI __attribute__((stdcall))
 #define IMPORT __declspec(dllimport)
 #define NULL ((void*)0)
-#define WS_OVERLAPPEDWINDOW 0x00CF0000L
+/* Fixed-size utility: no maximize button or accidental stretched controls. */
+#define WS_CAPTION 0x00C00000L
+#define WS_SYSMENU 0x00080000L
+#define WS_MINIMIZEBOX 0x00020000L
 #define WS_VISIBLE 0x10000000L
 #define WS_CHILD 0x40000000L
 #define WS_BORDER 0x00800000L
 #define WS_TABSTOP 0x00010000L
+#define SS_ETCHEDHORZ 0x00000010L
+#define SS_BITMAP 0x0000000EL
 #define ES_AUTOHSCROLL 0x0080L
 #define ES_PASSWORD 0x0020L
 #define BS_DEFPUSHBUTTON 0x00000001L
+#define WM_SETFONT 0x0030
+#define STM_SETIMAGE 0x0172
+#define IMAGE_BITMAP 0
+#define SWP_NOMOVE 0x0002
+#define SWP_NOZORDER 0x0004
 #define CW_USEDEFAULT ((int)0x80000000)
 #define WM_CREATE 1
 #define WM_DESTROY 2
@@ -83,6 +93,7 @@ IMPORT BOOL WINAPI GetComputerNameA(char *, DWORD *);
 IMPORT unsigned short WINAPI RegisterClassA(const WNDCLASSA *);
 IMPORT HWND WINAPI CreateWindowExA(DWORD,const char *,const char *,DWORD,int,int,int,int,HWND,void *,HINSTANCE,void *);
 IMPORT BOOL WINAPI ShowWindow(HWND,int);
+IMPORT BOOL WINAPI SetWindowPos(HWND,HWND,int,int,int,int,UINT);
 IMPORT BOOL WINAPI UpdateWindow(HWND);
 IMPORT LRESULT WINAPI DefWindowProcA(HWND,UINT,WPARAM,LPARAM);
 IMPORT BOOL WINAPI GetMessageA(MSG *,HWND,UINT,UINT);
@@ -97,6 +108,8 @@ IMPORT UINT WINAPI SetTimer(HWND,UINT,UINT,void *);
 IMPORT BOOL WINAPI KillTimer(HWND,UINT);
 IMPORT BOOL WINAPI SetWindowTextA(HWND,const char *);
 IMPORT LRESULT WINAPI SendMessageA(HWND,UINT,WPARAM,LPARAM);
+IMPORT HICON WINAPI LoadIconA(HINSTANCE,const char *);
+IMPORT HANDLE WINAPI LoadImageA(HINSTANCE,const char *,UINT,int,int,UINT);
 IMPORT BOOL WINAPI SetCursorPos(int,int);
 IMPORT void WINAPI mouse_event(DWORD,DWORD,DWORD,DWORD,void *);
 IMPORT short WINAPI VkKeyScanA(char);
@@ -114,6 +127,7 @@ IMPORT BOOL WINAPI BitBlt(void *,int,int,int,int,void *,int,int,DWORD);
 IMPORT int WINAPI GetDIBits(void *,void *,UINT,UINT,void *,void *,UINT);
 IMPORT BOOL WINAPI DeleteDC(void *);
 IMPORT BOOL WINAPI DeleteObject(void *);
+IMPORT HANDLE WINAPI CreateFontA(int,int,int,int,int,DWORD,DWORD,DWORD,DWORD,DWORD,DWORD,DWORD,DWORD,const char *);
 IMPORT DWORD WINAPI GetPrivateProfileStringA(const char *,const char *,const char *,char *,DWORD,const char *);
 IMPORT BOOL WINAPI WritePrivateProfileStringA(const char *,const char *,const char *,const char *);
 IMPORT DWORD WINAPI GetModuleFileNameA(HINSTANCE,char *,DWORD);
@@ -223,10 +237,18 @@ IMPORT DWORD WINAPI GetAdaptersInfo(void *,DWORD *);
 #define SRCCOPY 0x00CC0020
 #define DIB_RGB_COLORS 0
 
-static HINSTANCE g_instance; static HWND g_host, g_status, g_network_status, g_main_window;
+static HINSTANCE g_instance;
+static HWND g_host, g_host_summary, g_status, g_network_status, g_main_window;
+static HWND g_settings_button, g_advanced[6];
+static HANDLE g_ui_font, g_banner_bitmap;
+static int g_settings_open;
+/* Defined by lan_discovery.h later in this single translation unit. */
+static volatile DWORD hxp_discovery_verified, hxp_discovery_last_tick;
 static int g_update_activation;
 static char g_remote_token[65], g_remote_allowed_ip[16];
 static int strlen0(const char *s){int n=0;while(s[n])n++;return n;}
+static void exe_dir(char *out,int size);
+static void join_path(char *out,const char *dir,const char *file);
 static void append_number(char *out,int *pos,unsigned int value){
  char rev[10];int n=0;
  do {rev[n++]=(char)('0'+value%10);value/=10;} while(value && n<10);
@@ -234,7 +256,33 @@ static void append_number(char *out,int *pos,unsigned int value){
 }
 static void update_status(const char *s){ SetWindowTextA(g_status,s); }
 static HWND add(const char *kind,const char *text,DWORD style,int x,int y,int w,int h,HWND parent,int id){
- return CreateWindowExA(0,kind,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,parent,(void*)id,g_instance,NULL);
+ HWND child=CreateWindowExA(0,kind,text,WS_CHILD|WS_VISIBLE|style,x,y,w,h,parent,(void*)id,g_instance,NULL);
+ if(child && g_ui_font)SendMessageA(child,WM_SETFONT,(WPARAM)g_ui_font,1);
+ return child;
+}
+static void refresh_companion_status(void){
+ char dir[512], ini[512], host[100], line[160];
+ const char *prefix="Hermes host: ";
+ int n=0,k=0;
+ if(!g_host_summary || !g_status)return;
+ exe_dir(dir,sizeof(dir));join_path(ini,dir,"hermesxp.ini");
+ GetPrivateProfileStringA("Hermes","ServerIP","",host,sizeof(host),ini);
+ while(prefix[n] && n<140){line[n]=prefix[n];n++;}
+ if(!host[0])host[0]='(',host[1]='n',host[2]='o',host[3]='t',host[4]=' ',host[5]='s',host[6]='e',host[7]='t',host[8]=')',host[9]=0;
+ while(host[k] && n<155)line[n++]=host[k++];
+ line[n]=0;SetWindowTextA(g_host_summary,line);
+ if(!remote_token_is_valid(g_remote_token) || !g_remote_allowed_ip[0])
+  SetWindowTextA(g_status,"Not paired  -  complete secure pairing");
+ else if(hxp_discovery_verified &&
+         (DWORD)(GetTickCount()-hxp_discovery_last_tick)<30000u)
+  SetWindowTextA(g_status,"Connected  -  Hermes host verified");
+ else SetWindowTextA(g_status,"Paired  -  secure controls ready");
+}
+static void toggle_settings(HWND h){
+ g_settings_open=!g_settings_open;
+ for(int i=0;i<6;i++)if(g_advanced[i])ShowWindow(g_advanced[i],g_settings_open?5:0);
+ SetWindowTextA(g_settings_button,g_settings_open?"Hide settings":"Settings...");
+ SetWindowPos(h,NULL,0,0,424,g_settings_open?555:392,SWP_NOMOVE|SWP_NOZORDER);
 }
 /* Read an assigned IPv4 address from XP. This is connection status only:
    no WLAN scanning, password storage, or network configuration of any kind. */
@@ -1168,50 +1216,45 @@ static DWORD WINAPI screenshot_server(void *param){
 }
 static LRESULT WINAPI window_proc(HWND h, UINT msg, WPARAM w, LPARAM l){
  if(msg==WM_CREATE){
-  char dir[512], ini[512], host[100], ownerLine[160];
+  char dir[512], ini[512], host[100];
   exe_dir(dir,sizeof(dir));
   join_path(ini,dir,"hermesxp.ini");
   GetPrivateProfileStringA("Hermes","ServerIP","",host,sizeof(host),ini);
   GetPrivateProfileStringA("Hermes","OwnerEmail","user@hermes.local",g_owner,sizeof(g_owner),ini);
   GetPrivateProfileStringA("Hermes","OwnerPassword","",g_ownerPw,sizeof(g_ownerPw),ini);
-  add("STATIC","Hermes XP | First connection",0,18,16,330,24,h,100);
-  add("STATIC","Hermes host IPv4 address:",0,18,57,225,20,h,101);
-  g_host=add("EDIT",host,WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,18,82,222,25,h,102);
-  add("BUTTON","Test connection",WS_TABSTOP|BS_DEFPUSHBUTTON,246,82,144,26,h,103);
-  add("BUTTON","Install for MSN",WS_TABSTOP,18,118,222,26,h,107);
-  add("BUTTON","Screenshot",WS_TABSTOP,246,118,144,26,h,109);
-  if(g_owner[0]){
-   int i=0,j=0; const char *pre="MSN: ";
-   while(pre[i]){ownerLine[j++]=pre[i++];}
-   i=0; while(g_owner[i] && j<150){ownerLine[j++]=g_owner[i++];}
-   ownerLine[j]=0;
-   add("STATIC",ownerLine,0,246,122,144,20,h,108);
+  {HWND banner=add("STATIC","",SS_BITMAP,20,12,376,139,h,100);
+   g_banner_bitmap=LoadImageA(g_instance,(const char*)2,IMAGE_BITMAP,376,139,0);
+   if(banner && g_banner_bitmap)
+    SendMessageA(banner,STM_SETIMAGE,(WPARAM)IMAGE_BITMAP,(LPARAM)g_banner_bitmap);
   }
-  add("STATIC","Network status:",0,18,154,210,20,h,110);
-  g_network_status=add("STATIC","Checking Windows network status...",0,18,179,372,22,h,112);
-  add("STATIC","Connect to Wi-Fi or Ethernet using Windows XP.",0,18,207,374,20,h,113);
-  add("BUTTON","Network Connections...",WS_TABSTOP,18,235,214,27,h,111);
-  add("BUTTON","Refresh status",WS_TABSTOP,246,235,144,27,h,115);
-  refresh_network_status();
+  add("STATIC","",SS_ETCHEDHORZ,20,156,376,2,h,110);
+  add("STATIC","CONNECTION",0,20,170,370,20,h,113);
+  g_status=add("STATIC","Checking secure pairing...",0,20,192,376,25,h,104);
+  g_network_status=add("STATIC","Checking XP network...",0,20,220,376,22,h,112);
+  g_host_summary=add("STATIC","Hermes host: detecting...",0,20,247,376,22,h,116);
+  add("BUTTON","Refresh status",WS_TABSTOP|BS_DEFPUSHBUTTON,20,280,179,30,h,115);
+  g_settings_button=add("BUTTON","Settings...",WS_TABSTOP,210,280,185,30,h,117);
+  add("STATIC","Runs automatically at Windows sign-in.",0,20,328,380,22,h,106);
+  add("STATIC","",SS_ETCHEDHORZ,20,355,376,2,h,118);
+  g_advanced[0]=add("STATIC","Hermes host IPv4 address",0,20,370,350,20,h,119);
+  g_host=g_advanced[1]=add("EDIT",host,WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,20,395,220,26,h,102);
+  g_advanced[2]=add("BUTTON","Test host",WS_TABSTOP,251,395,144,27,h,103);
+  g_advanced[3]=add("BUTTON","Repair Messenger",WS_TABSTOP,20,436,179,28,h,107);
+  g_advanced[4]=add("BUTTON","Network Connections...",WS_TABSTOP,210,436,185,28,h,111);
+  g_advanced[5]=add("STATIC","Advanced setup only. Normal operation is automatic.",0,20,478,379,36,h,120);
+  for(int i=0;i<6;i++)ShowWindow(g_advanced[i],0);
+  refresh_network_status();refresh_companion_status();
   SetTimer(h,1,15000,NULL);
-  g_status=add("STATIC","Authenticated remote controls are available when paired.",0,18,270,383,24,h,104);
-  if(!g_remote_token[0] || !g_remote_allowed_ip[0]) update_status("Remote UI locked; configure [Remote] Token and AllowedHostIP.");
-  add("STATIC","Voice calls run inside Messenger using Hermes Talk on the server.",0,18,302,390,35,h,105);
-  add("STATIC","Windows XP SP3  |  32-bit  |  HermesXP",0,18,358,390,22,h,106);
   return 0;
  }
  if(msg==WM_COMMAND && (w&0xFFFF)==103){probe(h);return 0;}
  if(msg==WM_COMMAND && (w&0xFFFF)==107){do_install(h,0);return 0;}
- if(msg==WM_COMMAND && (w&0xFFFF)==109){
-  if(take_screenshot()) update_status("Screenshot saved to C:\\HermesXP\\screenshot.bmp");
-  else update_status("Screenshot failed.");
-  return 0;
- }
+ if(msg==WM_COMMAND && (w&0xFFFF)==117){toggle_settings(h);return 0;}
  if(msg==WM_COMMAND && (w&0xFFFF)==111){open_windows_network_connections(h);return 0;}
- if(msg==WM_COMMAND && (w&0xFFFF)==115){refresh_network_status();return 0;}
- if(msg==WM_TIMER && w==1){refresh_network_status();return 0;}
+ if(msg==WM_COMMAND && (w&0xFFFF)==115){refresh_network_status();refresh_companion_status();return 0;}
+ if(msg==WM_TIMER && w==1){refresh_network_status();refresh_companion_status();return 0;}
  if(msg==WM_CLOSE){DestroyWindow(h);return 0;}
- if(msg==WM_DESTROY){KillTimer(h,1);PostQuitMessage(0);return 0;}
+ if(msg==WM_DESTROY){KillTimer(h,1);if(g_banner_bitmap)DeleteObject(g_banner_bitmap);if(g_ui_font)DeleteObject(g_ui_font);PostQuitMessage(0);return 0;}
  return DefWindowProcA(h,msg,w,l);
 }
 static void load_remote_config(void){
@@ -1224,6 +1267,7 @@ static void load_remote_config(void){
 void WINAPI WinMainCRTStartup(void){
  WNDCLASSA c; MSG msg; HWND h; DWORD tid=0; HANDLE single_instance=NULL;
  g_instance=GetModuleHandleA(NULL);
+ g_ui_font=CreateFontA(-15,0,0,0,400,0,0,0,1,0,0,0,0,"Tahoma");
  load_remote_config();
  {const char *cl=GetCommandLineA();
   g_update_activation=cl && str_find(cl,"/update-activation")!=NULL;
@@ -1247,10 +1291,11 @@ void WINAPI WinMainCRTStartup(void){
  }
  /* Initialize the interactive GUI before starting the optional listener. */
  c.style=0; c.lpfnWndProc=window_proc; c.cbClsExtra=0; c.cbWndExtra=0;
- c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
+ c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=LoadIconA(g_instance,(const char*)1); c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
  c.lpszMenuName=NULL; c.lpszClassName="HermesXPMainWindow";
  if(!RegisterClassA(&c))ExitProcess(2);
- h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP Companion",WS_OVERLAPPEDWINDOW,80,80,426,440,NULL,NULL,g_instance,NULL);
+ /* Position high enough that expanded Settings fits a 1024x600 XP netbook. */
+ h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP Companion",WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,80,16,424,392,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
  g_main_window=h;
  /* NSIS selected the MSN integration component. Execute its already

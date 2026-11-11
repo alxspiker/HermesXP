@@ -1,0 +1,4 @@
+// Native Windows XP-compatible bitmap-backed icon. No PNG-in-ICO frames.
+1 ICON "hermesxp.ico"
+// Full HermesXP brand mark, embedded in the executable (no runtime download).
+2 BITMAP "hermesxp-banner.bmp"

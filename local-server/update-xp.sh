@@ -36,26 +36,30 @@ if [ "$REVISION" != "$CURRENT" ]; then
   systemctl --user daemon-reload
   systemctl --user enable --now hermes-xp-update.path hermes-xp-update.timer
   # The live Node bridge runs from ~/.hermes/msn-bridge, not the plugin
-  # checkout. Sync the bridge entrypoint BEFORE restarting its service.
-  # Never copy tokens, local account settings or node_modules from GitHub.
-  BRIDGE_LIVE="$HERMES_HOME/msn-bridge/bridge.js"
-  if [ -d "$HERMES_HOME/msn-bridge" ] && [ -f "$REPO/msn-bridge/bridge.js" ]; then
-    cp "$REPO/msn-bridge/bridge.js" "$BRIDGE_LIVE.tmp"
-    chmod 644 "$BRIDGE_LIVE.tmp"
-    mv -f "$BRIDGE_LIVE.tmp" "$BRIDGE_LIVE"
-    # Native signaling requires both the UUN frame decoder and SIP/RTP
-    # implementation. Update all atomically BEFORE the Node bridge restarts.
-    cp "$REPO/msn-bridge/native_call.js" "$HERMES_HOME/msn-bridge/native_call.js.tmp"
-    mv -f "$HERMES_HOME/msn-bridge/native_call.js.tmp" "$HERMES_HOME/msn-bridge/native_call.js"
-    cp "$REPO/msn-bridge/lan_address.js" "$HERMES_HOME/msn-bridge/lan_address.js.tmp"
-    mv -f "$HERMES_HOME/msn-bridge/lan_address.js.tmp" "$HERMES_HOME/msn-bridge/lan_address.js"
-    cp "$REPO/msn-bridge/msnclient/frame.js" "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp"
-    mv -f "$HERMES_HOME/msn-bridge/msnclient/frame.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/frame.js"
-    cp "$REPO/msn-bridge/msnclient/sso.js" "$HERMES_HOME/msn-bridge/msnclient/sso.js.tmp"
-    mv -f "$HERMES_HOME/msn-bridge/msnclient/sso.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/sso.js"
-    cp "$REPO/msn-bridge/msnclient/main.js" "$HERMES_HOME/msn-bridge/msnclient/main.js.tmp"
-    mv -f "$HERMES_HOME/msn-bridge/msnclient/main.js.tmp" "$HERMES_HOME/msn-bridge/msnclient/main.js"
-    echo "[update-xp] updated local MSN bridge code"
+  # checkout. Sync EVERY local CommonJS dependency before restarting it.
+  # A partial copy previously omitted file_transfer.js, offline_queue.js,
+  # and wlm_presence.js, leaving Messenger's Hermes bot in a restart loop.
+  # Never copy credentials, local configuration, or node_modules from GitHub.
+  BRIDGE_FILES=(
+    bridge.js native_call.js lan_address.js
+    file_transfer.js offline_queue.js wlm_presence.js
+    msnclient/frame.js msnclient/sso.js msnclient/main.js
+  )
+  if [ -d "$HERMES_HOME/msn-bridge/msnclient" ]; then
+    # Validate the full source set first, avoiding half-applied upgrades.
+    for file in "${BRIDGE_FILES[@]}"; do
+      if [ ! -s "$REPO/msn-bridge/$file" ]; then
+        echo "[update-xp] ERROR: missing bridge module in reviewed plugin: $file"
+        exit 1
+      fi
+    done
+    for file in "${BRIDGE_FILES[@]}"; do
+      dest="$HERMES_HOME/msn-bridge/$file"
+      cp "$REPO/msn-bridge/$file" "$dest.tmp"
+      chmod 644 "$dest.tmp"
+      mv -f "$dest.tmp" "$dest"
+    done
+    echo "[update-xp] updated all ${#BRIDGE_FILES[@]} local MSN bridge modules"
   else
     echo "[update-xp] ERROR: local bridge install missing; run local-server/install.sh"
     exit 1

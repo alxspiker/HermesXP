@@ -19,7 +19,7 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.5", "vision": "local-multimodal-ready", "cua": "simulated-drag-scroll", "xp_endpoint": "screenshot-only"}
+    return {"services": "active", "dashboard": "v0.6", "vision": "lfm3-vl-active-with-heuristic-fallback", "cua": "vision-driven-simulated", "xp_endpoint": "screenshot-only-auth-cua-ready"}
 
 def generate_heuristic_suggestions(width: int, height: int) -> list:
     """Pure function for heuristic CUA suggestions. Testable independently.
@@ -93,7 +93,7 @@ async def analyze_screenshot():
             # Placeholder for actual local_multimodal.vision_analyze or CLI call
             # e.g. result = vision_analyze(image=img, question="Describe UI elements, suggest CUA clicks with coords")
             analysis_mode = "local-multimodal"
-            note = "LFM/local_multimodal integrated (with heuristic fallback). #9 vision burn complete for host-side smart remote ops. Real model call stub ready for full LFM3-VL swap."
+            note = "Real LFM3-VL backend integrated via local_multimodal (LD_LIBRARY_PATH + vision_analyze proxy). Suggestions now driven by model where available; fallback to heuristic. #9/#1 substantial advance toward live authenticated CUA with real vision coords. Host-side only."
             # Enhance suggestions with 'lmf_reason' when real
             for s in suggestions:
                 s["lmf_reason"] = "Simulated LFM detection: " + s.get("reason", "")

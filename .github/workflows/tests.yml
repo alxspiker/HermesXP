@@ -18,6 +18,4 @@ jobs:
         python-version: '3.11'
 
     - name: Run comprehensive test suite
-      run: |
-        python -m unittest discover -s tests -v
-        echo "All 94+ tests passed - HermesXP test suite verified"
+      run: PYTHONPATH=local-server python -m unittest discover -s tests -v

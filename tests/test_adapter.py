@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import patch
@@ -53,6 +54,9 @@ def load_adapter():
 
 class TestBridge(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self._prior_queue = os.environ.get('HERMES_MSN_OFFLINE_QUEUE')
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ['HERMES_MSN_OFFLINE_QUEUE'] = str(pathlib.Path(self.tmp.name) / 'offline.json')
         os.environ['HERMES_XP_PROBE_BIND']='127.0.0.1'
         self.m=load_adapter()
         # Bind ephemeral ports so tests can run alongside the real MSN bridge.
@@ -71,6 +75,11 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.adapter.disconnect()
         os.environ.pop('HERMES_XP_PROBE_BIND',None)
+        if self._prior_queue is None:
+            os.environ.pop('HERMES_MSN_OFFLINE_QUEUE', None)
+        else:
+            os.environ['HERMES_MSN_OFFLINE_QUEUE'] = self._prior_queue
+        self.tmp.cleanup()
 
     async def test_probe(self):
         r,w=await asyncio.open_connection('127.0.0.1',self.probe_port)
@@ -162,6 +171,38 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
             self.m.PlatformConfig({'token':'S'*48,'owner_email':'me@example.invalid'}),
             'stranger@example.invalid', 'test')
         self.assertIn('error', result)
+
+    async def test_standalone_text_sender_preserves_queued_status_and_id(self):
+        seen = []
+        class Reply:
+            status = 202
+            def read(self, _limit):
+                return (b'{"success":true,"queued":true,"offline":true,'
+                        b'"status":"queued","delivered":false,'
+                        b'"message_id":"stable-id"}')
+        class Connection:
+            def __init__(self, host, port, timeout):
+                self.host, self.port, self.timeout = host, port, timeout
+            def request(self, method, path, body, headers):
+                self.method, self.path, self.body, self.headers = method, path, body, headers
+                seen.append(self)
+            def getresponse(self):
+                return Reply()
+            def close(self):
+                pass
+        config = self.m.PlatformConfig({'token':'S'*48,'owner_email':'me@example.invalid'})
+        with patch.object(self.m.http.client, 'HTTPConnection', side_effect=Connection):
+            result = await self.m.standalone_send(config, 'me@example.invalid', 'hello')
+        self.assertEqual(result, {
+            "success": True, "message_id": "stable-id", "queued": True,
+            "offline": True, "status": "queued", "delivered": False,
+        })
+        request = seen[0]
+        packet = json.loads(request.body)
+        self.assertEqual(request.path, "/send")
+        self.assertEqual(packet["to"], "me@example.invalid")
+        self.assertEqual(packet["text"], "hello")
+        self.assertTrue(packet["id"])
 
     async def test_registration_exposes_standalone_sender(self):
         captured={}

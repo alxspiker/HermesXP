@@ -7,9 +7,10 @@ const crypto = require('crypto');
 
 const MAX_ITEMS = 64;
 const MAX_TEXT = 4000;
+const MAX_COMPLETED_IDS = 256;
 
 function emptyState() {
-  return {outbound: [], inbound: []};
+  return {outbound: [], inbound: [], completed: []};
 }
 
 function validOutbound(item) {
@@ -33,13 +34,20 @@ function load(filePath) {
     throw err;
   }
   const data = JSON.parse(raw);
-  if (!data || !Array.isArray(data.outbound) || !Array.isArray(data.inbound)) {
+  if (!data || !Array.isArray(data.outbound) || !Array.isArray(data.inbound) ||
+      (data.completed !== undefined && !Array.isArray(data.completed))) {
     throw new Error('invalid offline queue');
   }
-  if (!data.outbound.every(validOutbound) || !data.inbound.every(validInbound)) {
+  const completed = data.completed || [];
+  if (!data.outbound.every(validOutbound) || !data.inbound.every(validInbound) ||
+      !completed.every(id => typeof id === 'string' && id.length > 0 && id.length <= 128)) {
     throw new Error('invalid offline queue item');
   }
-  return {outbound: data.outbound.slice(), inbound: data.inbound.slice()};
+  return {
+    outbound: data.outbound.slice(),
+    inbound: data.inbound.slice(),
+    completed: completed.slice(-MAX_COMPLETED_IDS),
+  };
 }
 
 function save(filePath, state) {
@@ -48,6 +56,7 @@ function save(filePath, state) {
   const body = JSON.stringify({
     outbound: state.outbound || [],
     inbound: state.inbound || [],
+    completed: (state.completed || []).slice(-MAX_COMPLETED_IDS),
   });
   const fd = fs.openSync(tmp, 'w', 0o600);
   try {
@@ -65,20 +74,27 @@ function enqueueOutbound(state, packet) {
     return {ok: false, error: 'offline queue unreadable'};
   }
   if (typeof packet.text !== 'string' || packet.text.length < 1 ||
-      packet.text.length > MAX_TEXT || typeof packet.to !== 'string') {
+      packet.text.length > MAX_TEXT || typeof packet.to !== 'string' ||
+      (packet.id !== undefined && (typeof packet.id !== 'string' ||
+       packet.id.length < 1 || packet.id.length > 128))) {
     return {ok: false, error: 'invalid message'};
+  }
+  const id = packet.id || crypto.randomUUID();
+  const existing = state.outbound.find(item => item.id === id);
+  if (existing || (state.completed || []).includes(id)) {
+    return {ok: true, item: existing || null, duplicate: true};
   }
   if (state.outbound.length >= MAX_ITEMS) {
     return {ok: false, error: 'offline queue full'};
   }
   const item = {
-    id: crypto.randomUUID(),
+    id,
     to: packet.to,
     text: packet.text,
     queued_at: Date.now(),
   };
   state.outbound.push(item);
-  return {ok: true, item};
+  return {ok: true, item, duplicate: false};
 }
 
 function enqueueInbound(state, packet) {
@@ -86,33 +102,43 @@ function enqueueInbound(state, packet) {
     return {ok: false, error: 'offline queue unreadable'};
   }
   if (typeof packet.body !== 'string' || packet.body.length < 1 ||
-      packet.body.length > MAX_TEXT || typeof packet.sender !== 'string') {
+      packet.body.length > MAX_TEXT || typeof packet.sender !== 'string' ||
+      (packet.id !== undefined && (typeof packet.id !== 'string' ||
+       packet.id.length < 1 || packet.id.length > 128))) {
     return {ok: false, error: 'invalid message'};
   }
-  let dropped = 0;
-  while (state.inbound.length >= MAX_ITEMS) {
-    state.inbound.shift();
-    dropped += 1;
+  const id = packet.id || crypto.randomUUID();
+  const existing = state.inbound.find(item => item.id === id);
+  if (existing) return {ok: true, item: existing, duplicate: true, dropped: 0};
+  if (state.inbound.length >= MAX_ITEMS) {
+    return {ok: false, error: 'offline queue full'};
   }
   const item = {
-    id: crypto.randomUUID(),
+    id,
     sender: packet.sender,
     body: packet.body,
     queued_at: Date.now(),
   };
   state.inbound.push(item);
-  return {ok: true, item, dropped};
+  return {ok: true, item, duplicate: false, dropped: 0};
 }
 
 function ack(state, lane, id) {
   if (!state || (lane !== 'outbound' && lane !== 'inbound') || !Array.isArray(state[lane])) {
     throw new Error('invalid offline queue');
   }
+  const before = state[lane].length;
   state[lane] = state[lane].filter(item => item.id !== id);
+  if (lane === 'outbound' && before !== state[lane].length) {
+    const completed = Array.isArray(state.completed) ? state.completed : [];
+    if (!completed.includes(id)) completed.push(id);
+    state.completed = completed.slice(-MAX_COMPLETED_IDS);
+  }
 }
 
 module.exports = {
   MAX_ITEMS,
+  MAX_COMPLETED_IDS,
   load,
   save,
   enqueueOutbound,

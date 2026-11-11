@@ -52,9 +52,11 @@ function persistQueue() {
   }
 }
 let flushingOutbound = false;
-function queueOutbound(text) {
+function queueOutbound(text, id) {
   if (!queueState || queueBroken || !owner) return {ok: false, error: 'offline queue unreadable'};
-  const result = offlineQueue.enqueueOutbound(queueState, {to: owner, text});
+  const packet = {to: owner, text};
+  if (id !== undefined) packet.id = id;
+  const result = offlineQueue.enqueueOutbound(queueState, packet);
   if (!result.ok) return result;
   if (!persistQueue()) return {ok: false, error: 'offline queue unreadable'};
   return result;
@@ -72,7 +74,7 @@ async function flushOutbound() {
         return;
       }
       if (queueState.outbound[0] && queueState.outbound[0].id === item.id) {
-        queueState.outbound.shift();
+        offlineQueue.ack(queueState, 'outbound', item.id);
         if (!persistQueue()) return;
       }
     }
@@ -80,8 +82,16 @@ async function flushOutbound() {
     flushingOutbound = false;
   }
 }
-function acceptOutbound(text) {
+function acceptOutbound(text, id) {
   const body = String(text).slice(0, 4000);
+  if (id !== undefined) {
+    if (typeof id !== 'string' || id.length < 1 || id.length > 128) {
+      return {ok: false, error: 'invalid message id'};
+    }
+    const queued = queueOutbound(body, id);
+    if (queued.ok && client.active === true) void flushOutbound();
+    return queued;
+  }
   const mustQueue = client.active !== true || flushingOutbound ||
     Boolean(queueState && queueState.outbound.length);
   if (mustQueue) {
@@ -199,14 +209,17 @@ const standaloneServer = http.createServer((req, res) => {
         packet.to.trim().toLowerCase() !== owner) return reply(403, {error: 'recipient not authorized'});
     if (typeof packet.text !== 'string' || !packet.text.trim() ||
         packet.text.length > 4000) return reply(400, {error: 'invalid message'});
-    const accepted = acceptOutbound(packet.text);
+    const messageId = crypto.randomUUID();
+    const accepted = acceptOutbound(packet.text, messageId);
     if (!accepted.ok) return reply(503, {error: accepted.error || 'MSN send failed'});
-    if (accepted.item) {
-      return reply(202, {
-        success: true, queued: true, offline: true, message_id: accepted.item.id,
-      });
-    }
-    return reply(202, {success: true, queued: true});
+    return reply(202, {
+      success: true,
+      queued: true,
+      offline: client.active !== true,
+      status: 'queued',
+      delivered: false,
+      message_id: messageId,
+    });
   });
 });
 standaloneServer.listen(STANDALONE_SEND_PORT, '127.0.0.1', () => {
@@ -267,7 +280,9 @@ if (process.env.HERMES_MSN_NATIVE_CALL === '1') {
     nativeCall.start();
   }, 3000).unref();
 }
-let bridge, bridgeReady = false;
+let bridge, bridgeReady = false, reliableQueue = false;
+let flushingInbound = false;
+const pendingInboundAcks = new Map();
 let backlog = [];
 function write(obj) {
   if (!bridgeReady || !bridge) return false;
@@ -275,12 +290,41 @@ function write(obj) {
   return true;
 }
 
+async function flushInbound() {
+  if (flushingInbound || !reliableQueue || !queueState || queueBroken || !bridgeReady) return;
+  flushingInbound = true;
+  try {
+    while (queueState.inbound.length && reliableQueue && bridgeReady) {
+      const item = queueState.inbound[0];
+      let resolveAck;
+      const acknowledged = new Promise(resolve => { resolveAck = resolve; });
+      pendingInboundAcks.set(item.id, resolveAck);
+      if (!write({type: 'incoming', id: item.id, sender: item.sender, body: item.body})) {
+        pendingInboundAcks.delete(item.id);
+        return;
+      }
+      let timer;
+      const timeout = new Promise(resolve => {
+        timer = setTimeout(() => resolve(false), 2000);
+      });
+      const wasAcknowledged = await Promise.race([acknowledged, timeout]);
+      clearTimeout(timer);
+      pendingInboundAcks.delete(item.id);
+      if (!wasAcknowledged && !bridgeReady) return;
+    }
+  } finally {
+    flushingInbound = false;
+  }
+}
+
 function connectBridge() {
   const sock = net.connect({host: '127.0.0.1', port: GATEWAY_PORT});
   bridge = sock;
   let buffer = '';
   let validated = false;
-  sock.on('connect', () => sock.write(JSON.stringify({type: 'hello', token}) + '\n'));
+  sock.on('connect', () => sock.write(JSON.stringify({
+    type: 'hello', token, protocol: 'queue-ack-v1',
+  }) + String.fromCharCode(10)));
   sock.on('data', data => {
     buffer += data.toString('utf8');
     if (buffer.length > 131072) {sock.destroy(); return;}
@@ -290,18 +334,34 @@ function connectBridge() {
       let packet; try {packet = JSON.parse(line);} catch {continue;}
       if (!validated) {
         if (packet.type !== 'hello_ok') {sock.destroy(); return;}
+        reliableQueue = packet.protocol === 'queue-ack-v1';
         validated = bridgeReady = true;
         console.log('Connected to Hermes gateway');
         if (queueState && !queueBroken) {
-          while (queueState.inbound.length) {
-            const queued = queueState.inbound[0];
-            if (!write({type:'incoming', sender:queued.sender, body:queued.body})) break;
-            queueState.inbound.shift();
-            if (!persistQueue()) break;
+          if (reliableQueue) {
+            void flushInbound();
+          } else {
+            while (queueState.inbound.length) {
+              const queued = queueState.inbound[0];
+              if (!write({type:'incoming', sender:queued.sender, body:queued.body})) break;
+              queueState.inbound.shift();
+              if (!persistQueue()) break;
+            }
           }
         }
         for (const msg of backlog) write(msg);
         backlog=[];
+        continue;
+      }
+      if (packet.type === 'incoming_ack' && reliableQueue &&
+          typeof packet.id === 'string' && queueState && !queueBroken) {
+        const exists = queueState.inbound.some(item => item.id === packet.id);
+        if (exists) {
+          offlineQueue.ack(queueState, 'inbound', packet.id);
+          if (!persistQueue()) continue;
+        }
+        const resolveAck = pendingInboundAcks.get(packet.id);
+        if (resolveAck) resolveAck(true);
         continue;
       }
       if (packet.type === 'send_file' && typeof packet.to === 'string' && typeof packet.name === 'string') {
@@ -321,14 +381,23 @@ function connectBridge() {
         if (packet.to.toLowerCase() !== String(process.env.HERMES_MSN_OWNER_EMAIL || '').toLowerCase()) {
           console.warn('Refused unexpected outbound recipient'); continue;
         }
-        const accepted = acceptOutbound(packet.text);
-        if (!accepted.ok) console.error('MSN send not accepted:', accepted.error);
+        if (reliableQueue && (typeof packet.id !== 'string' || packet.id.length > 128)) {
+          console.warn('Refused outbound packet without a bounded message id'); continue;
+        }
+        const accepted = acceptOutbound(packet.text, reliableQueue ? packet.id : undefined);
+        if (!accepted.ok) {
+          console.error('MSN send not accepted:', accepted.error);
+        } else if (reliableQueue) {
+          write({type: 'send_ack', id: packet.id, status: 'accepted_by_bridge'});
+        }
       }
     }
   });
   sock.on('error', error => console.warn('Hermes bridge connection:', error.message));
   sock.on('close', () => {
-    if (bridge === sock) {bridgeReady = false;bridge = null;}
+    if (bridge === sock) {bridgeReady = false;reliableQueue = false;bridge = null;}
+    for (const resolveAck of pendingInboundAcks.values()) resolveAck(false);
+    pendingInboundAcks.clear();
     setTimeout(connectBridge, 3000);
   });
 }
@@ -399,7 +468,23 @@ client.on('msg', msg => {
       : 'No native Messenger call is active.');
     return;
   }
-  const item = {type:'incoming',sender:owner,body:msg.body.slice(0,4000)};
+  const body = msg.body.slice(0,4000);
+  if (reliableQueue) {
+    if (!queueState || queueBroken) {
+      console.error('MSN inbound message not stored; offline queue unavailable');
+      return;
+    }
+    const queued = offlineQueue.enqueueInbound(queueState, {
+      sender: owner, body,
+    });
+    if (!queued.ok) {
+      console.error('MSN inbound message not stored:', queued.error);
+      return;
+    }
+    if (persistQueue()) void flushInbound();
+    return;
+  }
+  const item = {type:'incoming',sender:owner,body};
   if (!write(item)) {
     if (queueState && !queueBroken) {
       const queued = offlineQueue.enqueueInbound(queueState, {

@@ -121,6 +121,65 @@ def safe_file_basename(name):
     return name
 
 
+class InboundDedupLedger:
+    """Private, bounded ledger of inbound bridge IDs already accepted by Hermes."""
+
+    MAX_IDS = 256
+    MAX_BYTES = 32768
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def contains(self, message_id):
+        return message_id in self._read()
+
+    def remember(self, message_id):
+        if not isinstance(message_id, str) or not message_id or len(message_id) > 128:
+            raise ValueError("invalid inbound message id")
+        ids = self._read()
+        if message_id in ids:
+            return False
+        ids.append(message_id)
+        self._write(ids[-self.MAX_IDS:])
+        return True
+
+    def _read(self):
+        try:
+            with self.path.open("rb") as stream:
+                raw = stream.read(self.MAX_BYTES + 1)
+        except FileNotFoundError:
+            return []
+        if len(raw) > self.MAX_BYTES:
+            raise ValueError("inbound ledger too large")
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("ids"), list):
+            raise ValueError("invalid inbound ledger")
+        ids = data["ids"]
+        if len(ids) > self.MAX_IDS or not all(
+                isinstance(item, str) and 0 < len(item) <= 128 for item in ids):
+            raise ValueError("invalid inbound ledger ids")
+        return ids
+
+    def _write(self, ids):
+        self.path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(json.dumps({"ids": ids}).encode("utf-8"))
+                stream.flush()
+                os.fsync(stream.fileno())
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, self.path)
+        os.chmod(self.path, 0o600)
+
+
 class MSNPlatformAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("hermes_msn"))
@@ -132,10 +191,16 @@ class MSNPlatformAdapter(BasePlatformAdapter):
         self.bridge_writer = None
         self._bridge_tasks = set()
         self._write_lock = asyncio.Lock()
+        self._pending_outbound_acks = {}
+        self._queue_flush_task = None
+        self._queue_flush_event = asyncio.Event()
         queue_path = os.environ.get("HERMES_MSN_OFFLINE_QUEUE", "").strip()
         if not queue_path:
             queue_path = str(Path.home() / ".hermes" / "hermesxp-gateway-offline-queue.json")
         self.offline_queue = OfflineOutboundQueue(queue_path)
+        ledger_path = Path(queue_path).with_name(Path(queue_path).stem + ".inbound-seen.json")
+        self.inbound_ledger = InboundDedupLedger(ledger_path)
+        self._reliable_queue = False
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if len(self.secret) < 32 or not self.owner or "@" not in self.owner:
@@ -201,11 +266,19 @@ class MSNPlatformAdapter(BasePlatformAdapter):
                 log.warning("Rejecting unauthorized local MSN bridge")
                 return
             authorized = True
+            reliable_queue = request.get("protocol") == "queue-ack-v1"
+            self._reliable_queue = reliable_queue
             self.bridge_writer = writer
-            writer.write(b'{"type":"hello_ok"}\n')
+            hello_ok = {"type": "hello_ok"}
+            if reliable_queue:
+                hello_ok["protocol"] = "queue-ack-v1"
+            writer.write(json.dumps(hello_ok).encode("utf-8") + bytes([10]))
             await writer.drain()
             log.info("Local MSN bridge connected")
-            await self._flush_offline_queue()
+            if self._queue_flush_task and not self._queue_flush_task.done():
+                self._queue_flush_task.cancel()
+            self._queue_flush_event.set()
+            self._queue_flush_task = asyncio.create_task(self._flush_offline_queue())
             while True:
                 data = await reader.readline()
                 if not data:
@@ -215,6 +288,14 @@ class MSNPlatformAdapter(BasePlatformAdapter):
                 except (ValueError, UnicodeDecodeError):
                     continue
                 if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "send_ack":
+                    message_id = msg.get("id")
+                    if not isinstance(message_id, str):
+                        continue
+                    pending = self._pending_outbound_acks.get(message_id)
+                    if msg.get("status") == "accepted_by_bridge" and pending and not pending.done():
+                        pending.set_result(True)
                     continue
                 if msg.get("type") == "incoming_file":
                     if any(key in msg for key in ("contents", "body", "text", "path")):
@@ -241,35 +322,76 @@ class MSNPlatformAdapter(BasePlatformAdapter):
                     continue
                 if msg.get("type") != "incoming":
                     continue
+                message_id = msg.get("id")
+                if reliable_queue and (
+                        not isinstance(message_id, str) or not message_id or len(message_id) > 128):
+                    continue
                 sender = str(msg.get("sender", "")).lower().strip()
                 body = msg.get("body", "")
                 # Fail closed: even other contacts on Escargot must never trigger tools.
                 if sender != self.owner or not isinstance(body, str) or not body.strip():
+                    if reliable_queue:
+                        try:
+                            self.inbound_ledger.remember(message_id)
+                            await self._ack_incoming(writer, message_id)
+                        except (OSError, ValueError) as err:
+                            log.warning("MSN inbound reject not durably recorded: %s", type(err).__name__)
                     continue
                 body = body[:4000]
+                if reliable_queue:
+                    try:
+                        if self.inbound_ledger.contains(message_id):
+                            await self._ack_incoming(writer, message_id)
+                            continue
+                    except (OSError, ValueError) as err:
+                        log.warning("MSN inbound dedup ledger unreadable: %s", type(err).__name__)
+                        continue
                 event = MessageEvent(
                     text=body,
                     message_type=MessageType.TEXT,
                     user_id=sender,
                     user_name=sender,
-                    message_id=str(uuid.uuid4()),
+                    message_id=message_id if reliable_queue else str(uuid.uuid4()),
                     source=SessionSource(platform=Platform("hermes_msn"), chat_id=sender,
                                          chat_type="dm", user_id=sender, user_name=sender),
                 )
                 await self.handle_message(event)
+                if reliable_queue:
+                    try:
+                        self.inbound_ledger.remember(message_id)
+                        await self._ack_incoming(writer, message_id)
+                    except (OSError, ValueError) as err:
+                        log.warning("MSN inbound acknowledgement not durable: %s", type(err).__name__)
         except (ValueError, UnicodeDecodeError, OSError, asyncio.IncompleteReadError) as err:
             log.warning("MSN bridge error: %s", err)
         finally:
+            flush_task = self._queue_flush_task
+            self._queue_flush_task = None
+            if flush_task and flush_task is not asyncio.current_task() and not flush_task.done():
+                flush_task.cancel()
+                await asyncio.gather(flush_task, return_exceptions=True)
+            for acknowledgement in self._pending_outbound_acks.values():
+                if not acknowledgement.done():
+                    acknowledgement.cancel()
+            self._pending_outbound_acks.clear()
             if authorized and writer is self.bridge_writer:
                 self.bridge_writer = None
+                self._reliable_queue = False
             self._bridge_tasks.discard(task)
             writer.close()
             await writer.wait_closed()
 
-    def _write_send(self, writer, chat_id, text):
-        writer.write((json.dumps(
-            {"type": "send", "to": chat_id, "text": text},
-            ensure_ascii=False) + "\n").encode("utf-8"))
+    async def _ack_incoming(self, writer, message_id):
+        writer.write(json.dumps({
+            "type": "incoming_ack", "id": message_id,
+        }).encode("utf-8") + bytes([10]))
+        await writer.drain()
+
+    def _write_send(self, writer, chat_id, text, message_id=None):
+        packet = {"type": "send", "to": chat_id, "text": text}
+        if message_id is not None:
+            packet["id"] = message_id
+        writer.write(json.dumps(packet, ensure_ascii=False).encode("utf-8") + bytes([10]))
 
     def _queue_offline(self, chat_id, text):
         queued = self.offline_queue.enqueue(chat_id, text)
@@ -287,25 +409,48 @@ class MSNPlatformAdapter(BasePlatformAdapter):
         )
 
     async def _flush_offline_queue(self):
-        async with self._write_lock:
-            try:
-                pending = self.offline_queue.pending()
-            except (OSError, ValueError):
-                log.warning("MSN offline queue unreadable; not flushing")
-                return
-            for item in pending:
-                writer = self.bridge_writer
-                if writer is None or writer.is_closing():
-                    return
+        while True:
+            async with self._write_lock:
                 try:
-                    self._write_send(writer, item["to"], item["text"])
-                    await writer.drain()
-                except OSError:
-                    return
-                try:
-                    self.offline_queue.ack(item["id"])
+                    pending = self.offline_queue.pending()
                 except (OSError, ValueError):
+                    log.warning("MSN offline queue unreadable; not flushing")
                     return
+                if not pending:
+                    self._queue_flush_event.clear()
+            if not pending:
+                await self._queue_flush_event.wait()
+                continue
+            item = pending[0]
+            writer = self.bridge_writer
+            if writer is None or writer.is_closing():
+                return
+            acknowledgement = asyncio.get_running_loop().create_future()
+            self._pending_outbound_acks[item["id"]] = acknowledgement
+            try:
+                async with self._write_lock:
+                    if writer is not self.bridge_writer or writer.is_closing():
+                        return
+                    self._write_send(
+                        writer, item["to"], item["text"],
+                        item["id"] if self._reliable_queue else None,
+                    )
+                    await writer.drain()
+                if self._reliable_queue:
+                    await asyncio.wait_for(acknowledgement, timeout=3.0)
+                else:
+                    log.warning("MSN legacy bridge has no durable ACK; handing off queued text")
+            except asyncio.TimeoutError:
+                await asyncio.sleep(0.5)
+                continue
+            except OSError:
+                return
+            finally:
+                self._pending_outbound_acks.pop(item["id"], None)
+            try:
+                self.offline_queue.ack(item["id"])
+            except (OSError, ValueError):
+                return
 
     async def send(self, chat_id, content, reply_to=None, metadata=None):
         chat_id = str(chat_id).strip().lower()
@@ -313,20 +458,31 @@ class MSNPlatformAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Recipient not authorized")
         async with self._write_lock:
             file_name = metadata.get("file") if isinstance(metadata, dict) else None
-            if not self.bridge_writer or self.bridge_writer.is_closing():
-                if file_name is not None:
-                    return SendResult(success=False, error="MSN bridge is offline", retryable=True)
-                return self._queue_offline(chat_id, str(content)[:4000])
+            writer = self.bridge_writer
+            if file_name is None:
+                offline = not writer or writer.is_closing()
+                queued = self._queue_offline(chat_id, str(content)[:4000])
+                if not queued.success:
+                    return queued
+                queued.raw_response = {
+                    "queued": True,
+                    "offline": offline,
+                    "status": "queued",
+                }
+                if not offline:
+                    self._queue_flush_event.set()
+                    if self._queue_flush_task is None or self._queue_flush_task.done():
+                        self._queue_flush_task = asyncio.create_task(self._flush_offline_queue())
+                return queued
+            if not writer or writer.is_closing():
+                return SendResult(success=False, error="MSN bridge is offline", retryable=True)
+            safe = safe_file_basename(file_name)
+            if safe is None:
+                return SendResult(success=False, error="MSN file name is not an outbox basename")
+            packet = {"type": "send_file", "to": chat_id, "name": safe}
             try:
-                if file_name is not None:
-                    safe = safe_file_basename(file_name)
-                    if safe is None:
-                        return SendResult(success=False, error="MSN file name is not an outbox basename")
-                    packet = {"type": "send_file", "to": chat_id, "name": safe}
-                else:
-                    packet = {"type": "send", "to": chat_id, "text": str(content)[:4000]}
-                self.bridge_writer.write((json.dumps(packet, ensure_ascii=False)+"\n").encode("utf-8"))
-                await self.bridge_writer.drain()
+                writer.write(json.dumps(packet, ensure_ascii=False).encode("utf-8") + bytes([10]))
+                await writer.drain()
                 return SendResult(success=True, message_id=str(uuid.uuid4()))
             except OSError as err:
                 return SendResult(success=False, error=str(err), retryable=True)
@@ -335,11 +491,19 @@ class MSNPlatformAdapter(BasePlatformAdapter):
         return {"name": str(chat_id), "type": "dm"}
 
     async def disconnect(self):
-        if self.bridge_writer:
-            self.bridge_writer.close()
-            self.bridge_writer = None
-        for task in list(self._bridge_tasks):
+        writer = self.bridge_writer
+        self.bridge_writer = None
+        self._reliable_queue = False
+        if writer:
+            writer.close()
+        tasks = list(self._bridge_tasks)
+        for task in tasks:
             task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if self._queue_flush_task and not self._queue_flush_task.done():
+            self._queue_flush_task.cancel()
+            await asyncio.gather(self._queue_flush_task, return_exceptions=True)
         for server in (self.bridge_server, self.probe_server):
             if server:
                 server.close()
@@ -378,6 +542,7 @@ async def standalone_send(config, chat_id, message, *, thread_id=None,
     owner = str(extra_or_secret(extra, "owner_email", "HERMES_MSN_OWNER_EMAIL") or "").strip().lower()
     if len(token) < 32 or not owner or chat_id.strip().lower() != owner:
         return {"error": "MSN recipient not authorized or bridge not configured"}
+    message_id = str(uuid.uuid4())
     route = "/send"
     if media_files:
         if not isinstance(media_files, (list, tuple)) or len(media_files) != 1:
@@ -392,7 +557,9 @@ async def standalone_send(config, chat_id, message, *, thread_id=None,
             return {"error": "MSN standalone sender supports text only"}
         if not isinstance(message, str) or not message.strip() or len(message) > 4000:
             return {"error": "MSN message must be 1–4000 characters"}
-        payload = json.dumps({"to": owner, "text": message}, ensure_ascii=False).encode("utf-8")
+        payload = json.dumps({
+            "to": owner, "text": message, "id": message_id,
+        }, ensure_ascii=False).encode("utf-8")
         if len(payload) > 8192:
             return {"error": "MSN message too large"}
 
@@ -408,8 +575,21 @@ async def standalone_send(config, chat_id, message, *, thread_id=None,
             result = json.loads(data)
             if not result.get("success"):
                 return {"error": "MSN bridge did not accept the send"}
-            # The bridge queues a send via the MSN library; not an end-to-end
-            # acknowledgement of delivery to Windows Live Messenger.
+            if route == "/send":
+                response_id = result.get("message_id")
+                if not isinstance(response_id, str) or not response_id:
+                    response_id = message_id
+                status = result.get("status")
+                if status not in ("queued", "accepted_by_bridge"):
+                    status = "queued" if result.get("offline") is True else "submitted"
+                return {
+                    "success": True,
+                    "message_id": response_id,
+                    "queued": bool(result.get("queued", True)),
+                    "offline": result.get("offline") is True,
+                    "status": status,
+                    "delivered": False,
+                }
             return {"success": True, "message_id": str(uuid.uuid4()), "queued": True}
         finally:
             conn.close()

@@ -35,6 +35,7 @@ typedef long LRESULT; typedef int BOOL; typedef unsigned short WORD; typedef uns
 #define MOUSEEVENTF_LEFTUP 0x0004
 #define MOUSEEVENTF_RIGHTDOWN 0x0008
 #define MOUSEEVENTF_RIGHTUP 0x0010
+#define MOUSEEVENTF_WHEEL 0x0800
 #define VK_SHIFT 0x10
 #define AF_INET 2
 #define SOCK_STREAM 1
@@ -105,6 +106,7 @@ IMPORT HWND WINAPI GetForegroundWindow(void);
 IMPORT void *WINAPI GetDC(HWND);
 IMPORT int WINAPI ReleaseDC(HWND,void *);
 IMPORT int WINAPI GetSystemMetrics(int);
+IMPORT UINT WINAPI GetDoubleClickTime(void);
 /* GDI (gdi32) for the screenshot capture. */
 IMPORT void *WINAPI CreateCompatibleDC(void *);
 IMPORT void *WINAPI CreateCompatibleBitmap(void *,int,int);
@@ -129,6 +131,7 @@ IMPORT BOOL WINAPI WriteFile(HANDLE,const void *,DWORD,DWORD *,void *);
 IMPORT DWORD WINAPI GetFileSize(HANDLE,DWORD *);
 IMPORT BOOL WINAPI CloseHandle(HANDLE);
 IMPORT DWORD WINAPI GetLastError(void);
+IMPORT DWORD WINAPI GetTickCount(void);
 IMPORT DWORD WINAPI WaitForSingleObject(HANDLE,DWORD);
 IMPORT void WINAPI Sleep(DWORD);
 IMPORT BOOL WINAPI CreateProcessA(const char *,char *,void *,void *,BOOL,DWORD,void *,const char *,void *,void *);
@@ -1015,6 +1018,13 @@ fail:
 }
 #include "update_receiver.h"
 static void press_key(BYTE vk){ keybd_event(vk,0,0,NULL); keybd_event(vk,0,KEYEVENTF_KEYUP,NULL); }
+static unsigned int g_remote_action_last_tick=0, g_remote_action_seen=0;
+static int remote_action_allowed(unsigned int sock){
+ if(!hermesxp_remote_rate_allowed((unsigned int)GetTickCount(),&g_remote_action_last_tick,&g_remote_action_seen)){
+  send_http_text(sock,"429 Too Many Requests","UI action rate limit exceeded");return 0;
+ }
+ return 1;
+}
 static int do_remote_ui(unsigned int sock,const char *req,int bodyLen){
  int header=http_header_end(req,strlen0(req)); const char *body=req+header;
  if(request_is(req,"GET","/ui/inspect")){
@@ -1031,18 +1041,64 @@ static int do_remote_ui(unsigned int sock,const char *req,int bodyLen){
  }
  if(request_is(req,"POST","/ui/click")){
   unsigned int x,y; int right; int w=GetSystemMetrics(SM_CXSCREEN),h=GetSystemMetrics(SM_CYSCREEN);
-  if(!hermesxp_remote_parse_click(body,bodyLen,(unsigned int)w,(unsigned int)h,&x,&y,&right)){
+  if(w<1||h<1||!hermesxp_remote_parse_click(body,bodyLen,(unsigned int)w,(unsigned int)h,&x,&y,&right)){
    send_http_text(sock,"400 Bad Request","invalid coordinates or button");return 1;
   }
+  if(!remote_action_allowed(sock))return 1;
   if(!SetCursorPos((int)x,(int)y)){send_http_text(sock,"500 Internal Server Error","click failed");return 1;}
   if(right){mouse_event(MOUSEEVENTF_RIGHTDOWN,0,0,0,NULL);mouse_event(MOUSEEVENTF_RIGHTUP,0,0,0,NULL);}
   else {mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,NULL);mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,NULL);}
   send_http_text(sock,"200 OK","clicked");return 1;
  }
+ if(request_is(req,"POST","/ui/double-click")){
+  unsigned int x,y; int right; int w=GetSystemMetrics(SM_CXSCREEN),h=GetSystemMetrics(SM_CYSCREEN);
+  if(w<1||h<1||!hermesxp_remote_parse_click(body,bodyLen,(unsigned int)w,(unsigned int)h,&x,&y,&right)||right){
+   send_http_text(sock,"400 Bad Request","invalid double-click coordinates");return 1;
+  }
+  if(!remote_action_allowed(sock))return 1;
+  if(!SetCursorPos((int)x,(int)y)){send_http_text(sock,"500 Internal Server Error","double-click failed");return 1;}
+  mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,NULL);mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,NULL);
+  Sleep(hermesxp_remote_double_click_delay(GetDoubleClickTime()));
+  mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,NULL);mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,NULL);
+  send_http_text(sock,"200 OK","double-clicked");return 1;
+ }
+ if(request_is(req,"POST","/ui/drag")){
+  unsigned int x1,y1,x2,y2,step; int w=GetSystemMetrics(SM_CXSCREEN),h=GetSystemMetrics(SM_CYSCREEN);
+  long dx,dy;
+  if(w<1||h<1||!hermesxp_remote_parse_drag(body,bodyLen,(unsigned int)w,(unsigned int)h,&x1,&y1,&x2,&y2)){
+   send_http_text(sock,"400 Bad Request","invalid drag coordinates");return 1;
+  }
+  if(!remote_action_allowed(sock))return 1;
+  if(!SetCursorPos((int)x1,(int)y1)){send_http_text(sock,"500 Internal Server Error","drag failed");return 1;}
+  dx=(long)x2-(long)x1;dy=(long)y2-(long)y1;
+  mouse_event(MOUSEEVENTF_LEFTDOWN,0,0,0,NULL);
+  for(step=1;step<=10;step++){
+   int px=(int)((long)x1+(dx*(long)step)/10);
+   int py=(int)((long)y1+(dy*(long)step)/10);
+   if(!SetCursorPos(px,py)){
+    mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,NULL);
+    send_http_text(sock,"500 Internal Server Error","drag failed");return 1;
+   }
+   Sleep(10);
+  }
+  mouse_event(MOUSEEVENTF_LEFTUP,0,0,0,NULL);
+  send_http_text(sock,"200 OK","dragged");return 1;
+ }
+ if(request_is(req,"POST","/ui/scroll")){
+  unsigned int x,y; int delta,w=GetSystemMetrics(SM_CXSCREEN),h=GetSystemMetrics(SM_CYSCREEN);
+  if(w<1||h<1||!hermesxp_remote_parse_scroll(body,bodyLen,(unsigned int)w,(unsigned int)h,&x,&y,&delta)){
+   send_http_text(sock,"400 Bad Request","invalid scroll coordinates or delta");return 1;
+  }
+  if(!remote_action_allowed(sock))return 1;
+  if(!SetCursorPos((int)x,(int)y)){send_http_text(sock,"500 Internal Server Error","scroll failed");return 1;}
+  mouse_event(MOUSEEVENTF_WHEEL,0,0,(DWORD)(delta*120),NULL);
+  send_http_text(sock,"200 OK","scrolled");return 1;
+ }
  if(request_is(req,"POST","/ui/type")){
   int i; short key; unsigned int mods;
   if(!hermesxp_remote_text_is_safe(body,bodyLen)){send_http_text(sock,"400 Bad Request","text must be 1-128 printable ASCII characters");return 1;}
   for(i=0;i<bodyLen;i++){key=VkKeyScanA(body[i]);mods=((unsigned short)key)>>8;if(key==-1 || (mods&6)){send_http_text(sock,"400 Bad Request","unsupported key character");return 1;}}
+  if(!remote_action_allowed(sock))return 1;
   for(i=0;i<bodyLen;i++){
    key=VkKeyScanA(body[i]);mods=((unsigned short)key)>>8;
    if(mods&1)keybd_event(VK_SHIFT,0,0,NULL);
@@ -1056,6 +1112,7 @@ static int do_remote_ui(unsigned int sock,const char *req,int bodyLen){
   if(bodyLen<1 || bodyLen>12){send_http_text(sock,"400 Bad Request","invalid key");return 1;}
   for(i=0;i<bodyLen;i++)name[i]=body[i];name[bodyLen]=0;vk=hermesxp_remote_key_code(name);
   if(!vk){send_http_text(sock,"400 Bad Request","key not allow-listed");return 1;}
+  if(!remote_action_allowed(sock))return 1;
   press_key((BYTE)vk);send_http_text(sock,"200 OK","key sent");return 1;
  }
  return 0;

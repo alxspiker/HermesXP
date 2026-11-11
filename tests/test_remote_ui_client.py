@@ -2,7 +2,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from tools.hermesxp_ui import (HermesXPClient, validate_click, validate_key,
+from tools.hermesxp_ui import (HermesXPClient, validate_click, validate_drag, validate_scroll, validate_key,
                               validate_text, validate_token, validate_service_command)
 
 
@@ -36,6 +36,80 @@ class RemoteUiClientValidationTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=2)
             server.server_close()
+
+    def test_double_click_drag_and_scroll_use_authenticated_fixed_endpoints(self):
+        received = []
+        replies = {"/ui/double-click": b"double-clicked", "/ui/drag": b"dragged", "/ui/scroll": b"scrolled"}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                received.append((self.path, self.headers.get("X-Hermes-Token"), body))
+                reply = replies[self.path]
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *_args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        token = "0123456789abcdef" * 4
+        try:
+            client = HermesXPClient("127.0.0.1", token, port=server.server_port)
+            self.assertEqual(client.double_click(5, 9, 100, 100), "double-clicked")
+            self.assertEqual(client.drag(1, 2, 99, 98, 100, 100), "dragged")
+            self.assertEqual(client.scroll(5, 9, 100, 100, -2), "scrolled")
+            self.assertEqual(received, [
+                ("/ui/double-click", token, b"x=5&y=9&button=left"),
+                ("/ui/drag", token, b"x1=1&y1=2&x2=99&y2=98"),
+                ("/ui/scroll", token, b"x=5&y=9&delta=-2"),
+            ])
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_mouse_action_requires_exact_host_acknowledgement(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                reply = b"ignored"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = HermesXPClient("127.0.0.1", "0123456789abcdef" * 4, port=server.server_port)
+            with self.assertRaisesRegex(RuntimeError, "did not acknowledge"):
+                client.double_click(5, 9, 100, 100)
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+
+    def test_drag_and_scroll_validators_bound_all_values(self):
+        self.assertEqual(validate_drag(0, 0, 99, 99, 100, 100), (0, 0, 99, 99))
+        with self.assertRaises(ValueError):
+            validate_drag(0, 0, 100, 99, 100, 100)
+        with self.assertRaises(ValueError):
+            validate_drag(0, 0, -1, 99, 100, 100)
+        self.assertEqual(validate_scroll(1, 2, 100, 100, -5), (1, 2, -5))
+        for delta in (0, 6, -6):
+            with self.subTest(delta=delta), self.assertRaises(ValueError):
+                validate_scroll(1, 2, 100, 100, delta)
+        with self.assertRaises(ValueError):
+            validate_scroll(100, 2, 100, 100, 1)
 
     def test_token_must_be_64_hex_chars(self):
         self.assertTrue(validate_token("0123456789abcdef" * 4))

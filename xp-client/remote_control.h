@@ -163,6 +163,90 @@ static int hermesxp_remote_parse_click(const char *body, int length,
     return 0;
 }
 
+static int remote_take_field(const char *body, int length, int *offset,
+        const char *key, char *value, int value_size, int more) {
+    int key_length = 0, n = 0;
+    while (key[key_length]) ++key_length;
+    if (!body || !offset || !value || value_size < 2 || *offset < 0 ||
+        length < *offset || length - *offset < key_length ||
+        !remote_literal_equal(body + *offset, key, key_length)) return 0;
+    *offset += key_length;
+    while (*offset < length && body[*offset] != '&') {
+        if (n >= value_size - 1) return 0;
+        value[n++] = body[(*offset)++];
+    }
+    if (n == 0) return 0;
+    value[n] = 0;
+    if (more) {
+        if (*offset >= length || body[*offset] != '&') return 0;
+        ++*offset;
+    } else if (*offset != length) return 0;
+    return 1;
+}
+
+static int hermesxp_remote_parse_drag(const char *body, int length,
+        unsigned int width, unsigned int height, unsigned int *x1, unsigned int *y1,
+        unsigned int *x2, unsigned int *y2) {
+    char value[12];
+    int offset = 0;
+    if (!body || !x1 || !y1 || !x2 || !y2 || width == 0 || height == 0 ||
+        length < 1 || length > 47) return 0;
+    if (!remote_take_field(body,length,&offset,"x1=",value,sizeof(value),1) ||
+        !hermesxp_remote_parse_uint(value,0,width-1,x1) ||
+        !remote_take_field(body,length,&offset,"y1=",value,sizeof(value),1) ||
+        !hermesxp_remote_parse_uint(value,0,height-1,y1) ||
+        !remote_take_field(body,length,&offset,"x2=",value,sizeof(value),1) ||
+        !hermesxp_remote_parse_uint(value,0,width-1,x2) ||
+        !remote_take_field(body,length,&offset,"y2=",value,sizeof(value),0) ||
+        !hermesxp_remote_parse_uint(value,0,height-1,y2)) return 0;
+    return 1;
+}
+
+static int remote_parse_delta(const char *text, int *delta) {
+    int i = 0, sign = 1, value = 0;
+    if (!text || !delta || !text[0]) return 0;
+    if (text[i] == '-') { sign = -1; ++i; }
+    if (!text[i]) return 0;
+    for (; text[i]; ++i) {
+        if (text[i] < '0' || text[i] > '9') return 0;
+        value = value * 10 + (text[i] - '0');
+        if (value > 5) return 0;
+    }
+    *delta = sign * value;
+    return *delta != 0;
+}
+
+static int hermesxp_remote_parse_scroll(const char *body, int length,
+        unsigned int width, unsigned int height, unsigned int *x, unsigned int *y, int *delta) {
+    char value[12];
+    int offset = 0;
+    if (!body || !x || !y || !delta || width == 0 || height == 0 ||
+        length < 1 || length > 40) return 0;
+    if (!remote_take_field(body,length,&offset,"x=",value,sizeof(value),1) ||
+        !hermesxp_remote_parse_uint(value,0,width-1,x) ||
+        !remote_take_field(body,length,&offset,"y=",value,sizeof(value),1) ||
+        !hermesxp_remote_parse_uint(value,0,height-1,y) ||
+        !remote_take_field(body,length,&offset,"delta=",value,sizeof(value),0) ||
+        !remote_parse_delta(value,delta)) return 0;
+    return 1;
+}
+
+static unsigned int hermesxp_remote_double_click_delay(unsigned int system_ms) {
+    unsigned int delay = system_ms / 4u;
+    if (delay < 10u) delay = 10u;
+    if (delay > 100u) delay = 100u;
+    return delay;
+}
+
+static int hermesxp_remote_rate_allowed(unsigned int now, unsigned int *last,
+        unsigned int *seen) {
+    if (!last || !seen) return 0;
+    if (*seen && (unsigned int)(now - *last) < 100u) return 0;
+    *last = now;
+    *seen = 1;
+    return 1;
+}
+
 static int hermesxp_remote_text_is_safe(const char *text, int length) {
     int i;
     if (!text || length < 1 || length > 128) return 0;

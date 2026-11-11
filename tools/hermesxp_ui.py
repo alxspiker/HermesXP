@@ -44,6 +44,19 @@ def validate_click(
     return x, y, button
 
 
+def validate_drag(x1: int, y1: int, x2: int, y2: int, width: int, height: int) -> tuple[int, int, int, int]:
+    validate_click(x1, y1, width, height)
+    validate_click(x2, y2, width, height)
+    return x1, y1, x2, y2
+
+
+def validate_scroll(x: int, y: int, width: int, height: int, delta: int) -> tuple[int, int, int]:
+    validate_click(x, y, width, height)
+    if type(delta) is not int or delta == 0 or not -5 <= delta <= 5:
+        raise ValueError("Scroll delta must be an integer from -5 to -1 or 1 to 5")
+    return x, y, delta
+
+
 def validate_text(text: str) -> bytes:
     if not isinstance(text, str) or not 1 <= len(text) <= 128:
         raise ValueError("Text must contain 1–128 characters")
@@ -100,6 +113,12 @@ class HermesXPClient:
         finally:
             connection.close()
 
+    def _post_ack(self, path: str, body: bytes, expected: str) -> str:
+        response = self._request("POST", path, body).decode("ascii", "replace").strip()
+        if response != expected:
+            raise RuntimeError("HermesXP did not acknowledge the requested mouse action")
+        return response
+
     def screenshot(self) -> bytes:
         return self._request("GET", "/screenshot.bmp")
 
@@ -110,6 +129,21 @@ class HermesXPClient:
         x, y, button = validate_click(x, y, width, height, button)
         payload = f"x={x}&y={y}&button={button}".encode("ascii")
         return self._request("POST", "/ui/click", payload).decode("ascii", "replace")
+
+    def double_click(self, x: int, y: int, width: int, height: int) -> str:
+        x, y, _button = validate_click(x, y, width, height, "left")
+        body = f"x={x}&y={y}&button=left".encode("ascii")
+        return self._post_ack("/ui/double-click", body, "double-clicked")
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int, width: int, height: int) -> str:
+        x1, y1, x2, y2 = validate_drag(x1, y1, x2, y2, width, height)
+        body = f"x1={x1}&y1={y1}&x2={x2}&y2={y2}".encode("ascii")
+        return self._post_ack("/ui/drag", body, "dragged")
+
+    def scroll(self, x: int, y: int, width: int, height: int, delta: int) -> str:
+        x, y, delta = validate_scroll(x, y, width, height, delta)
+        body = f"x={x}&y={y}&delta={delta}".encode("ascii")
+        return self._post_ack("/ui/scroll", body, "scrolled")
 
     def type_text(self, text: str) -> str:
         return self._request("POST", "/ui/type", validate_text(text)).decode("ascii", "replace")
@@ -133,8 +167,8 @@ def request(
 ) -> tuple[str, bytes]:
     """Make an authenticated local control call, returning type and raw response."""
     client = HermesXPClient(host=host, token=token, port=port, timeout=timeout)
-    if path not in ("/ui/inspect", "/ui/click", "/ui/type", "/ui/key", "/screenshot.bmp",
-                    "/system/service", "/network/status"):
+    if path not in ("/ui/inspect", "/ui/click", "/ui/double-click", "/ui/drag", "/ui/scroll",
+                    "/ui/type", "/ui/key", "/screenshot.bmp", "/system/service", "/network/status"):
         raise ValueError("Unsupported endpoint")
     if not isinstance(body, bytes):
         raise ValueError("Request body must be bytes")

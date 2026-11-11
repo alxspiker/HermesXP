@@ -29,6 +29,7 @@ EXPORTS
  _GetDC@4=GetDC
  _ReleaseDC@8=ReleaseDC
  _GetSystemMetrics@4=GetSystemMetrics
+ _GetDoubleClickTime@0=GetDoubleClickTime
  _SetCursorPos@8=SetCursorPos
  _mouse_event@20=mouse_event
  _VkKeyScanA@4=VkKeyScanA

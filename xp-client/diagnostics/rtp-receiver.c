@@ -35,6 +35,7 @@ IMPORT BOOL WINAPI QueryPerformanceFrequency(QPC *);
 IMPORT DWORD WINAPI GetTickCount(void);
 IMPORT HANDLE WINAPI GetStdHandle(DWORD);
 IMPORT BOOL WINAPI WriteFile(HANDLE, const void *, DWORD, DWORD *, void *);
+IMPORT char * WINAPI GetCommandLineA(void);
 IMPORT void WINAPI ExitProcess(DWORD);
 
 #define AF_INET 2
@@ -91,10 +92,35 @@ void WINAPI mainCRTStartup(void) {
   DWORD maxgap = 0, mingap = 99999, loss = 0, duplicates = 0;
   DWORD started = 0, ticks_per_ms = 0, last_low = 0;
   unsigned short last_seq = 0;
+  char sender_ip[16];
+  const char *arg = GetCommandLineA();
+  int ip_len = 0, dots = 0;
   SOCKET sock = INVALID_SOCKET;
   QPC freq, clock;
   int active = 0;
   out_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+  /* An explicit host IP is mandatory. No developer LAN address is built in.
+     Win32 command-line parsing is sufficient for one unquoted IPv4 argument. */
+  if (*arg == '"') {
+    arg++;
+    while (*arg && *arg != '"') arg++;
+    if (*arg) arg++;
+  } else {
+    while (*arg && *arg != ' ' && *arg != '\t') arg++;
+  }
+  while (*arg == ' ' || *arg == '\t') arg++;
+  while ((*arg >= '0' && *arg <= '9') || *arg == '.') {
+    if (ip_len >= 15) break;
+    if (*arg == '.') dots++;
+    sender_ip[ip_len++] = *arg++;
+  }
+  sender_ip[ip_len] = 0;
+  if (!ip_len || dots != 3 || (*arg != 0 && *arg != ' ' && *arg != '\t') ||
+      inet_addr(sender_ip) == 0xFFFFFFFFu) {
+    put("Usage: rtp-receiver.exe <sender-ipv4>\r\n");
+    emit();
+    ExitProcess(1);
+  }
   if (WSAStartup(0x0202, wsa) != 0) {
     fail("WSAStartup", (DWORD)WSAGetLastError()); ExitProcess(2);
   }
@@ -141,7 +167,7 @@ void WINAPI mainCRTStartup(void) {
       fail("recv", (DWORD)error);
       break;
     }
-    if (sender.address != inet_addr("192.168.1.81") ||
+    if (sender.address != inet_addr(sender_ip) ||
         !is_rtp(packet, size, &seq)) continue;
     QueryPerformanceCounter(&clock);
     if (!active) {

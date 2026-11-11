@@ -130,6 +130,28 @@ class TestAuthenticatedLanDiscovery(unittest.TestCase):
         self.save.assert_not_called()
         self.restart.assert_called_once()
 
+    def test_host_ip_migration_updates_package_host_binding(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            server = home / ".hermes/msn-server"
+            server.mkdir(parents=True)
+            (server / "settings_local.py").write_text("TARGET_HOST = '192.168.1.81'\n")
+            unit = home / ".config/systemd/user/hermes-xp-package.service"
+            unit.parent.mkdir(parents=True)
+            unit.write_text("ExecStart=/usr/bin/python3 -m http.server 18767 --bind 192.168.1.81\n")
+            with (
+                patch("tools.lan_discovery.subprocess.Popen") as restarted,
+                patch("tools.lan_discovery.subprocess.run") as run,
+            ):
+                self.assertTrue(reconcile_host_ip("192.168.5.19", home=home))
+            self.assertIn("--bind 192.168.5.19", unit.read_text())
+            run.assert_called_once()
+            self.assertEqual(run.call_args.args[0], ["systemctl", "--user", "daemon-reload"])
+            restarted.assert_any_call(
+                ["systemctl", "--user", "try-restart", "hermes-xp-package.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+            )
+
     def test_tls_leaf_ip_san_rotates_under_same_ca_without_changing_private_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
             certs = Path(tmp)

@@ -21,8 +21,9 @@ LIB = ROOT / "local-server" / "wlm_content.py"
 PATCHER = ROOT / "local-server" / "patch-server.py"
 HOSTING = ROOT / "local-server" / "wlm_hosting.py"
 PRESENCE = ROOT / "msn-bridge" / "wlm_presence.js"
-UPSTREAM = pathlib.Path("/home/hermes/.hermes/msn-server/front/msn/http/other.py")
-UPSTREAM_NS = pathlib.Path("/home/hermes/.hermes/msn-server/front/msn/msnp_ns.py")
+MSN_HOME = pathlib.Path(os.environ.get("HERMES_HOME", str(pathlib.Path.home() / ".hermes")))
+UPSTREAM = MSN_HOME / "msn-server/front/msn/http/other.py"
+UPSTREAM_NS = MSN_HOME / "msn-server/front/msn/msnp_ns.py"
 
 DOCUMENTED_SHA1C = "U32o6bosZzluJq82eAtMpx5dIEI="
 UUID_A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"

@@ -1,12 +1,15 @@
 #!/bin/bash
 # Generate a local CA + server cert for the HermesXP MSN TLS terminator.
 # The CA cert (ca.pem) must be installed into the XP Trusted Root store
-# (double-click it on the XP, or certmgr). The server cert covers the ZBook
-# LAN IP (IP SAN) so WLM can validate https://192.168.1.81/login.
+# (double-click it on the XP, or certmgr). The server cert covers the
+# configured Hermes host LAN IP (IP SAN) so WLM can validate HTTPS sign-in.
 # Usage: ./make-ca.sh <certs-dir> <lan-ip>   (idempotent: skips if present)
 set -euo pipefail
 CERTS_DIR="${1:?certs dir}"
 LAN_IP="${2:?lan ip}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+python3 "$SCRIPT_DIR/../tools/validate_lan_ip.py" "$LAN_IP" ||
+    { echo "make-ca: expected an RFC1918 LAN IPv4 address" >&2; exit 2; }
 mkdir -p "$CERTS_DIR"
 cd "$CERTS_DIR"
 
@@ -20,7 +23,7 @@ openssl genrsa -out ca-key.pem 2048 2>/dev/null
 openssl req -x509 -new -nodes -key ca-key.pem -sha256 -days 3650 \
     -subj "/CN=HermesXP Local MSN CA" -out ca.pem 2>/dev/null
 
-# Server cert: IP SAN = ZBook LAN IP, DNS SAN = msn.local
+# Server cert: IP SAN = configured Hermes host LAN IP, DNS SAN = msn.local
 openssl genrsa -out server-key.pem 2048 2>/dev/null
 openssl req -new -key server-key.pem -subj "/CN=$LAN_IP" -out server.csr 2>/dev/null
 printf "subjectAltName=IP:%s,DNS:msn.local\n" "$LAN_IP" > server.ext

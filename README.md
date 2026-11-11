@@ -451,9 +451,9 @@ and host settings. Do **not** publish a host-specific installer on the public
 GitHub repository. `makensis` (from the free NSIS compiler package) is
 required on the build host, **not** on Windows XP.
 
-**Status: local server build in progress.** The XP probe (Step A) passed and the Hermes plugin (Step B) is installed. The local MSN server (Step C) is now built in: `local-server/install.sh` installs Escargot's open server code on the Hermes host, so **no Escargot website signup is needed** — WLM on the XP talks to a server running on the ZBook, and the Hermes bot logs in to the same server. The XP sign-in test (TLS 1.0 + local CA) is the remaining unverified step.
+The local MSN server (Step C) is built in: `local-server/install.sh` installs Escargot's open server code on the Hermes host, so **no Escargot website signup is needed**. WLM on XP talks to the host's LAN address, and the Hermes bot logs in to the same server. Every installation must test its own XP connectivity, TLS configuration and paired-device permissions.
 
-The XP companion is **not an agent runtime or remote execution service**. It is a read-only TCP connectivity probe. The modern host has a Hermes platform adapter and a separate Node.js bridge for an experimental MSN bot library.
+The XP companion is **not an independent LLM runtime**. It provides an authenticated paired-device interface and desktop controls, in addition to connection probing. The modern host runs Hermes, the platform adapter and the Messenger bridge.
 
 ## Contents
 
@@ -465,7 +465,7 @@ The XP companion is **not an agent runtime or remote execution service**. It is 
 | `dist/HermesXP-Updater.exe` | Windows XP SP3 x86 | Separate restart-and-rollback helper |
 | `msn-bridge/bridge.js` | Hermes host, Node 18+ | Connects MSN bot to Hermes via authenticated localhost JSON-lines |
 | `msn-bridge/msnclient/` | Hermes host, Node | Patched copy of tutmonde/msnclient (GPLv3) — server host/login URL come from env, see `LOCAL-PATCH.md` |
-| `local-server/install.sh` | Hermes host (ZBook), bash | One-time installer: downloads msn-server, creates accounts, starts services, sets up TLS |
+| `local-server/install.sh` | Hermes host, bash | One-time installer: downloads msn-server, creates accounts, starts services, sets up TLS |
 | `tools/probe_server.py` | Hermes host, Python | Optional stand-alone probe test *without* Hermes |
 | `xp-client/*` | Build machine | C source, import definitions, clang/lld build script |
 | `tests/` | Build machine | Simulated adapter loopback protocol tests |
@@ -473,11 +473,11 @@ The XP companion is **not an agent runtime or remote execution service**. It is 
 ## Architecture
 
 ```text
-WLM 2009 on XP  ---> local MSN server on the ZBook (msn-server, :1863/:1864)
+WLM 2009 on XP  ---> local MSN server on the Hermes host (msn-server, :1863/:1864)
   (Switcher patch   + stunnel TLS terminator on :443 for the HTTPS sign-in)
   redirects
   login.live.com     |
-  to <ZBook LAN IP>  |  MSN bot account (hermes-bot@hermes.local)
+  to <host LAN IP>   |  MSN bot account (configured bot address)
                      |       |
                      |  msn-bridge/bridge.js (Node)
                      |       | loopback 127.0.0.1:18764 + secret
@@ -488,7 +488,7 @@ WLM 2009 on XP  ---> local MSN server on the ZBook (msn-server, :1863/:1864)
 HermesXP.exe on XP --> LAN port 18765 --> read-only host probe
 ```
 
-**There is no Escargot account in this setup.** The MSN server is Escargot's open server code (valtron/msn-server, CC BY-NC 4.0), downloaded by the installer at setup time and run locally on the ZBook. It is not vendored in this repo (license). This plugin does not automatically rewrite the original client or store Hermes LLM API keys on XP — the Switcher patch and CA install on the XP are the two manual steps (Step C).
+**There is no Escargot account in this setup.** The MSN server is Escargot's open server code (valtron/msn-server, CC BY-NC 4.0), downloaded by the installer at setup time and run locally on the Hermes host. It is not vendored in this repo (license). Hermes LLM API keys are not stored on XP.
 
 ## Step A: test the XP executable independently
 
@@ -497,7 +497,7 @@ HermesXP.exe on XP --> LAN port 18765 --> read-only host probe
 3. It should report **Hermes host reached! Probe OK. Not yet paired.** No services are installed and no configuration is changed.
 4. Stop `probe_server.py` after testing. Do not run this alongside the plugin probe listener on the same IP/port.
 
-If it fails, check host IP, Windows/host firewall, routing, and that port 18765 is listening. Avoid the XP WMI paths that crashed Ruiter.
+If it fails, check host IP, Windows/host firewall, routing, and that port 18765 is listening. Avoid reliance on XP WMI features, which may fail on older installations.
 
 ## Step B: install Hermes gateway adapter on the modern host
 
@@ -510,7 +510,7 @@ If it fails, check host IP, Windows/host firewall, routing, and that port 18765 
    HERMES_MSN_OWNER_EMAIL=user@hermes.local
    HERMES_MSN_ALLOWED_USERS=user@hermes.local
    # Optional: your HOST's private LAN IP to enable the read-only XP probe
-   HERMES_XP_PROBE_BIND=<ZBook LAN IP>
+   HERMES_XP_PROBE_BIND=<Hermes host LAN IP>
    ```
 
 4. Enable the plugin: `hermes plugins enable hermes-msn`. Enable the platform in Hermes gateway configuration if it isn't enabled automatically:
@@ -527,7 +527,7 @@ If it fails, check host IP, Windows/host firewall, routing, and that port 18765 
 
 ## Step C: local MSN server (no Escargot signup)
 
-Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent — safe to re-run.
+Run the installer on the Hermes host as the account that runs Hermes. It is idempotent — safe to re-run.
 
 1. One-time system prerequisites (as a sudo user on the host):
    ```sh
@@ -540,7 +540,7 @@ Run the installer on the Hermes host (ZBook) as user `hermes`. It is idempotent 
    ```sh
    cd local-server && ./install.sh
    ```
-   It clones Escargot's server code pinned to commit `9cddb9c` into `~/.hermes/msn-server` (downloaded at install time, not vendored — CC BY-NC 4.0), creates a venv + dependencies, writes `settings_local.py` (all redirects to the ZBook LAN IP), creates the SQLite databases, creates the two accounts (`user@hermes.local` owner, `hermes-bot@hermes.local` bot, unless overridden), writes their credentials into `~/.hermes/.env`, and starts three systemd user services: `msn-server` (:1863/:1864/:8081), `msn-tls` (stunnel :443 → 8081, TLS 1.0 + old ciphers for XP), `hermes-msn-bridge` (Node bridge → 127.0.0.1:18764).
+   It clones Escargot's server code pinned to commit `9cddb9c` into `~/.hermes/msn-server` (downloaded at install time, not vendored — CC BY-NC 4.0), creates a venv + dependencies, writes `settings_local.py` (redirects to the chosen host LAN IP), creates the SQLite databases, creates the two accounts (`user@hermes.local` owner, `hermes-bot@hermes.local` bot, unless overridden), writes their credentials into `~/.hermes/.env`, and starts three systemd user services: `msn-server` (:1863/:1864/:8081), `msn-tls` (stunnel :443 → 8081, TLS 1.0 + old ciphers for XP), `hermes-msn-bridge` (Node bridge → 127.0.0.1:18764).
    The optional UFW step asks for the XP device's **single IPv4 address**, shows the proposed inbound TCP ports (443, 1863 and 1864), and requires confirmation. It invokes only the trusted system UFW executable, using `sudo -n` first and requesting interactive sudo authorization if needed and a terminal is available. It never runs this user-writable Python helper as root for authorization. Without suitable sudo permission, ask an administrator to configure the firewall. It does not enable inactive UFW, open ports for an entire subnet, or configure other firewalls. Non-interactive installs leave the firewall unchanged; run `python3 local-server/setup-firewall.py` later to use the helper. Existing broader rules are not removed; rule verification does not establish effective connectivity or precedence over earlier rules. A failed operation can leave earlier successfully added rules in place. Port 18767 (package download) is not opened by the helper: transfer via USB or arrange a separate temporary, XP-IP-restricted rule with your administrator.
 
 3. **The installer prints the owner password ONCE** (`OWNER_PASSWORD_FOR_WLM=...`). Give it to the person who will type it into WLM on the XP. It is never written to a file.
@@ -583,7 +583,7 @@ Vision integration (#9) completed. **Web dashboard (#4) advanced with initial sk
 
 Run `python3 local-server/api_server.py` from the plugin checkout, then open `http://127.0.0.1:8082`. The server binds to loopback by default and refuses wildcard/public bind addresses. To make the dashboard reachable from another trusted LAN device, set `HERMES_DASHBOARD_BIND_HOST` to the Hermes host's private interface IP and enforce the LAN firewall; never port-forward 8082 to the public Internet. Use an encrypted tunnel when outside that LAN. Do not substitute `python -m http.server`: the dashboard requires the authenticated host API.
 
-The dashboard reads live user-systemd unit states, checks fixed loopback service ports, displays XP update artifact/checksum and package presence without asserting deployment, and reports registry/API diagnostics. Paired XP probes and screenshots require explicit user clicks/confirmation; the browser never receives pairing tokens or connects directly to XP. Unprobed devices are labeled paired, not online. Screenshot analysis displays actual LFM3-VL detections with model-reported bounds/confidence separately from heuristic suggestions, and falls back to empty detections if inference fails (see `docs/vision-lfm3vl.md`).
+The dashboard reads live user-systemd unit states, checks fixed loopback service ports, displays XP update artifact/checksum and package presence without asserting deployment, and reports registry/API diagnostics. Paired XP probes and screenshots require explicit user clicks/confirmation; the browser never receives pairing tokens or connects directly to XP. Unprobed devices are labeled paired, not online. Screenshot analysis uses a **configurable local or OpenAI-compatible vision backend**, with validated detections distinct from heuristic suggestions; failure reports an empty detection list (see `docs/vision-lfm3vl.md` for paths, model/provider selection, privacy and API options).
 
 Host-side verification: `PYTHONPATH=local-server python -m unittest discover -s tests -v`. Tests cover status/error handlers, paired-device probe timeouts, token non-disclosure, update metadata, compatibility of the legacy `/api/status` schema, static dashboard wiring, and responsive layout. Fixture tests do not establish live XP behavior; no physical XP was accessed for these changes.
 

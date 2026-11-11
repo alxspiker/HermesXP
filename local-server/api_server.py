@@ -66,7 +66,13 @@ async def status():
     return {
         "services": service_summary,
         "dashboard": "v0.7",
-        "vision": "lfm3-vl" if vision["state"] == "verified" else "heuristic-only",
+        "vision": (
+            "lfm3-vl" if vision["state"] == "verified"
+            and vision.get("backend", "llama-cli") == "llama-cli"
+            and str(vision.get("model", "")).startswith("LFM3-VL")
+            else "vision-model" if vision["state"] == "verified"
+            else "heuristic-only"
+        ),
         "model": vision["model"] or "unavailable",
         "cua": "live-opt-in" if cua_configured else "simulated-only",
         "xp_endpoint": "paired-device-authenticated",
@@ -388,7 +394,7 @@ def generate_heuristic_suggestions(width: int, height: int) -> list:
 
 @app.get("/api/analyze")
 def analyze_screenshot(device: str | None = None):
-    """Analyze a paired-device screenshot with LFM3-VL and separate heuristics."""
+    """Analyze a paired-device screenshot with configured vision and separate heuristics."""
     try:
         content, width, height = fetch_paired_screenshot(device)
         suggestions = generate_heuristic_suggestions(width, height)
@@ -396,7 +402,9 @@ def analyze_screenshot(device: str | None = None):
             image = Image.open(io.BytesIO(content)).convert("RGB")
             detections = infer_lfm3vl(image)
             vision = model_status()
-            analysis_mode = "lfm3-vl"
+            analysis_mode = ("lfm3-vl" if vision.get("backend", "llama-cli") == "llama-cli"
+                             and str(vision.get("model", "")).startswith("LFM3-VL")
+                             else "vision-model")
             model = vision["model"]
             model_error = None
             note = "Controls and bounds are model detections; suggestions are separate heuristic estimates. Verify detections before acting."
@@ -405,7 +413,7 @@ def analyze_screenshot(device: str | None = None):
             analysis_mode = "heuristic"
             model = None
             model_error = type(exc).__name__
-            note = "LFM3-VL inference failed; only heuristic coordinate estimates are available. No controls were reported as detected."
+            note = "Configured vision inference unavailable; only heuristic coordinate estimates are available. No controls were reported as detected."
         analysis = {
             "status": "success",
             "analysis_mode": analysis_mode,

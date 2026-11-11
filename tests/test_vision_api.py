@@ -127,6 +127,23 @@ class TestVisionAPI(unittest.TestCase):
             self.assertTrue(0 <= suggestion["coords"][0] < 80)
             self.assertTrue(0 <= suggestion["coords"][1] < 60)
 
+    def test_custom_vision_provider_is_not_reported_as_lfm3(self):
+        with (
+            patch("api_server.fetch_paired_screenshot", return_value=(self.bmp_bytes(), 80, 60)),
+            patch("api_server.infer_lfm3vl", return_value=[]),
+            patch("api_server.model_status", return_value={
+                "state": "verified", "model": "custom-vl",
+                "backend": "openai-compatible", "last_success": 123.0, "error": None,
+            }),
+        ):
+            client = TestClient(app)
+            analysis = client.get("/api/analyze").json()
+            status = client.get("/api/status").json()
+        self.assertEqual(analysis["analysis_mode"], "vision-model")
+        self.assertEqual(analysis["model"], "custom-vl")
+        self.assertEqual(status["vision"], "vision-model")
+        self.assertEqual(status["model"], "custom-vl")
+
     def test_status_reports_model_unavailable_and_simulated_cua(self):
         result = TestClient(app).get("/api/status").json()
         self.assertEqual(result["vision"], "heuristic-only")

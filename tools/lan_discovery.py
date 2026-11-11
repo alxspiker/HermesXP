@@ -184,8 +184,13 @@ def reconcile_host_ip(host_ip: str, home: Path | None = None) -> bool:
             (r"(?m)^(\s*accept\s*=\s*)\d+\.\d+\.\d+\.\d+:443\b",
              lambda m: f"{m.group(1)}{host_ip}:443"),
         ]),
+        ((home or Path.home()) / ".config/systemd/user/hermes-xp-package.service", [
+            (r"(?m)^(ExecStart=/usr/bin/python3 -m http\.server 18767 --bind )\d+\.\d+\.\d+\.\d+\s*$",
+             lambda m: f"{m.group(1)}{host_ip}"),
+        ]),
     ]
     changed = False
+    package_unit_changed = False
     for path, transforms in specs:
         try:
             content = path.read_text()
@@ -201,11 +206,23 @@ def reconcile_host_ip(host_ip: str, home: Path | None = None) -> bool:
                 os.chmod(tmp, path.stat().st_mode & 0o777)
                 os.replace(tmp, path)
                 changed = True
+                if path.name == "hermes-xp-package.service":
+                    package_unit_changed = True
             finally:
                 tmp.unlink(missing_ok=True)
     if changed or leaf_changed:
         LOG.info("Managed MSN server endpoints now use authenticated LAN IP %s", host_ip)
-        for unit in ("msn-server.service", "msn-tls.service"):
+        if package_unit_changed:
+            try:
+                subprocess.run(["systemctl", "--user", "daemon-reload"],
+                               stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=True, timeout=5)
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                LOG.warning("Cannot reload updated package service: %s", type(exc).__name__)
+        units = ["msn-server.service", "msn-tls.service"]
+        if package_unit_changed:
+            units.append("hermes-xp-package.service")
+        for unit in units:
             try:
                 subprocess.Popen(["systemctl", "--user", "try-restart", unit],
                                  stdout=subprocess.DEVNULL,

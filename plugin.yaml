@@ -43,3 +43,39 @@ optional_env:
   - name: MSN_LOGIN_URL
     description: Passport login URL the bridge uses (installer default http://127.0.0.1:8081/login = local server)
     password: false
+  - name: HERMESXP_VISION_BACKEND
+    description: Host dashboard screenshot inference backend (llama-cli, openai-compatible, disabled). Configure in dashboard process environment.
+    password: false
+  - name: HERMESXP_VISION_MODEL
+    description: Optional GGUF model filename for llama-cli backend (default LFM3-VL). Other models need a matching projector.
+    password: false
+  - name: HERMESXP_VISION_ROOT
+    description: Optional local model/runtime root directory (defaults to ~/local-multimodal on the host).
+    password: false
+  - name: HERMESXP_VISION_MODEL_PATH
+    description: Optional absolute or model-directory-relative GGUF path used by the host dashboard.
+    password: false
+  - name: HERMESXP_VISION_PROJECTOR_PATH
+    description: Optional matching multimodal projector path for the chosen GGUF model.
+    password: false
+  - name: HERMESXP_VISION_LLAMA_CLI
+    description: Optional llama-cli binary path for screenshot inference.
+    password: false
+  - name: HERMESXP_VISION_FFMPEG_DIR
+    description: Optional directory containing ffmpeg for compatible local multimodal runtimes.
+    password: false
+  - name: HERMESXP_VISION_LIBRARY_PATH
+    description: Optional dynamic library search paths for local llama-cli runtime.
+    password: false
+  - name: HERMESXP_VISION_THREADS
+    description: Optional local inference CPU thread count (1-32, default 4).
+    password: false
+  - name: HERMESXP_VISION_API_URL
+    description: Explicit opt-in vision chat/completions URL (screenshot is transmitted to this endpoint).
+    password: false
+  - name: HERMESXP_VISION_API_MODEL
+    description: Model ID served by the selected OpenAI-compatible vision endpoint.
+    password: false
+  - name: HERMESXP_VISION_API_KEY
+    description: Optional bearer key for the configured vision endpoint; keep on host, never on XP.
+    password: true

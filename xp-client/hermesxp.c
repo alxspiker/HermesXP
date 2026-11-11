@@ -1301,7 +1301,7 @@ void WINAPI WinMainCRTStartup(void){
  c.hInstance=g_instance=GetModuleHandleA(NULL); c.hIcon=NULL; c.hCursor=NULL; c.hbrBackground=(HBRUSH)6;
  c.lpszMenuName=NULL; c.lpszClassName="HermesXPMainWindow";
  if(!RegisterClassA(&c))ExitProcess(2);
- h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP - Ruiter Companion",WS_OVERLAPPEDWINDOW,80,80,426,440,NULL,NULL,g_instance,NULL);
+ h=CreateWindowExA(0,"HermesXPMainWindow","Hermes XP Companion",WS_OVERLAPPEDWINDOW,80,80,426,440,NULL,NULL,g_instance,NULL);
  if(!h)ExitProcess(1);
  g_main_window=h;
  /* Updater candidate validation: load all DLLs, create the custom window,

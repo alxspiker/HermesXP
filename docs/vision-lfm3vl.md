@@ -1,15 +1,39 @@
-# LFM3-VL screenshot analysis
+# Configurable screenshot vision
 
-The host API's `/api/analyze` route runs the local LFM3-VL 2B Q4 model through the bundled `llama-cli` runtime. It first obtains the screenshot through the authenticated paired-device registry; it does not contain a fixed XP address or expose device credentials to the browser.
+HermesXP's optional host dashboard can analyze screenshots from authenticated paired XP devices. The image is never sent to a model unless the operator requests analysis. The default backend is **local llama-cli**, and it defaults to LFM3-VL only for compatibility with existing installations; **other compatible vision models are selectable**. The second backend is an explicitly configured **OpenAI-compatible chat completions endpoint** (including locally hosted Ollama or llama.cpp servers). Neither backend is required for MSN messaging, voice, remote control, or pairing.
 
-The default runtime root is `/home/hermes/local-multimodal`. Override it with `HERMESXP_LFM3_ROOT` only when the replacement root contains the expected CLI, model, projector, and runtime libraries:
+Set these environment variables in the **host dashboard process** before starting `python3 local-server/api_server.py` (plugin environment settings alone do not automatically configure a separately launched dashboard):
 
-- `bin/llama-b12167/llama-cli`
-- `models/LFM3-VL-2B-QAD-Q4_0.gguf`
-- `models/mmproj-LFM3-VL-2B-F16.gguf`
+| Variable | Purpose |
+| --- | --- |
+| `HERMESXP_VISION_BACKEND` | `llama-cli` (default), `openai-compatible`, or `disabled` |
+| `HERMESXP_VISION_ROOT` | Local runtime root (defaults to `~/local-multimodal`; legacy `HERMESXP_LFM3_ROOT` is supported) |
+| `HERMESXP_VISION_MODEL` | Local GGUF filename (default `LFM3-VL-2B-QAD-Q4_0.gguf`) |
+| `HERMESXP_VISION_MODEL_PATH` | Override model path (absolute or relative to the runtime's `models/` folder) |
+| `HERMESXP_VISION_PROJECTOR_PATH` | Matching multimodal projector (absolute or relative to `models/`) |
+| `HERMESXP_VISION_LLAMA_CLI` | Absolute llama-cli binary path, or path relative to runtime root |
+| `HERMESXP_VISION_FFMPEG_DIR` | Directory containing an ffmpeg executable for runtimes that need it |
+| `HERMESXP_VISION_LIBRARY_PATH` | Explicit native-library search paths for the selected CLI build |
+| `HERMESXP_VISION_THREADS` | Local inference CPU threads (default 4; maximum 32) |
+| `HERMESXP_VISION_API_URL` | Explicit full chat/completions URL, such as `http://127.0.0.1:11434/v1/chat/completions` |
+| `HERMESXP_VISION_API_MODEL` | Model ID supported by the configured endpoint |
+| `HERMESXP_VISION_API_KEY` | Optional Bearer token (do not copy into XP packages) |
 
-The subprocess uses a fixed argument vector (no shell), offline mode, four CPU threads, a 180-second timeout, a 7 GiB address-space limit, a 64 KiB output cap, and screenshots up to 3840×2160. Reasoning is disabled for this structured extraction call so the model can return the requested JSON instead of consuming its generation budget on an incomplete reasoning trace.
+Example: local OpenAI-compatible service (no API key required):
 
-Valid model detections contain a control type, visible text when readable, pixel-space bounding box, model-reported confidence, and `source: "LFM3-VL"`. Confidence is model-reported and has not been calibrated. Proportional heuristic suggestions remain a separate `suggestions` field and must not be described as detections. If model inference or parsing fails, the API returns `analysis_mode: "heuristic"`, an empty `detections` list, and the error type; it does not invent model detections. `/api/status` reports the model as unavailable until a valid local inference has succeeded in that process.
+```bash
+export HERMESXP_VISION_BACKEND=openai-compatible
+export HERMESXP_VISION_API_URL=http://127.0.0.1:11434/v1/chat/completions
+export HERMESXP_VISION_API_MODEL=your-installed-vision-model
+python3 local-server/api_server.py
+```
 
-A local synthetic-dialog fixture has been passed through the actual LFM3-VL runtime and returned the visible dialog, OK button, and Cancel button with bounding boxes. This verifies host-side inference and coordinate conversion only; it does not prove live XP screenshot acquisition or UI accuracy on the physical XP device. No live XP request is needed for this test.
+For local llama-cli, provide a compatible GGUF and projector; model support depends on the particular llama.cpp build. A model switch does not imply every GGUF vision architecture will work. The legacy runtime layout (`bin/llama-b12167/llama-cli`, `models/LFM3-VL-2B-QAD-Q4_0.gguf`, `models/mmproj-LFM3-VL-2B-F16.gguf`) remains the default under the configured runtime root.
+
+## Boundaries and honest status
+
+The subprocess uses fixed arguments (no shell), offline mode, a 180-second timeout, up to four million-ish screenshot pixels (max 3840×2160), a 64 KiB output cap, and resource limits when `prlimit` is available. API mode uses an explicit URL and does not follow HTTP redirects. Plain HTTP is allowed only for explicitly configured private/loopback IPs or localhost; use HTTPS for external hosts.
+
+**Privacy:** Selecting a remote API sends the XP screenshot, including any visible sensitive content, to that endpoint. The operator is responsible for the model provider's privacy and billing terms. Neither API keys nor model files are sent to XP. Use the local backend or `disabled` if the image must remain on the Hermes host.
+
+The detector validates model output into a maximum of 100 control boxes with normalized coordinates, text, and model-reported confidence; confidence is not calibrated. Heuristic suggestions are kept separate from detections. On failure, the endpoint returns an empty detection list rather than inventing detections. `/api/status` reports a model as verified only after an inference succeeds in that server process. Host-side tests do not substitute for physical XP testing.

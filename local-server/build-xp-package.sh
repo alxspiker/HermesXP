@@ -13,7 +13,7 @@
 #   README.txt              install steps (incl. the one manual PE-edit step)
 #
 # Output: ~/.hermes/msn-server/xp-package/HermesXP.zip
-# Get it from the LAN at http://<ZBook LAN IP>:18767/HermesXP.zip (the
+# Get it from the LAN at http://<Hermes host LAN IP>:18767/HermesXP.zip (the
 # hermes-xp-package service), or copy the zip to a USB drive.
 #
 # Usage: ./build-xp-package.sh [repo-root]   (default: the repo this script lives in)
@@ -31,7 +31,8 @@ SWITCHER_DL="$SERVER_DIR/switcher-dl"
 log() { echo "[xp-package] $*"; }
 warn() { echo "[xp-package] WARNING: $*" >&2; }
 
-# Remove previously published secrets before any operation that can fail.
+# Clear stale public artifacts before any operation that might fail. A failed
+# build must not leave an old archive (potentially containing secrets) served.
 rm -f -- "$PKG_DIR/HermesXP.zip"
 rm -f -- "$PKG_DIR/HermesXP-Setup.exe"
 rm -rf -- "$STAGE"
@@ -42,6 +43,10 @@ if [ -z "${LAN_IP:-}" ]; then
     [ -z "$LAN_IP" ] && LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 fi
 [ -n "$LAN_IP" ] || { echo "[xp-package] could not detect LAN IP; set LAN_IP env" >&2; exit 1; }
+if ! python3 "$SCRIPT_DIR/../tools/validate_lan_ip.py" "$LAN_IP"; then
+    echo "[xp-package] LAN_IP must be an RFC1918 LAN IPv4 address" >&2
+    exit 2
+fi
 
 # Owner address is non-secret. Never put any passwords in the LAN package.
 OWNER_EMAIL="user@hermes.local"

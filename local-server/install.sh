@@ -1,12 +1,12 @@
 #!/bin/bash
-# HermesXP local MSN server — one-time installer (ZBook, run as user `hermes`).
+# HermesXP local MSN server — one-time installer (run as the Hermes host user).
 #
 # What it does:
 #   1. Downloads Escargot's open server code (valtron/msn-server, CC BY-NC 4.0)
 #      at install time, pinned to the tested commit. The code is NOT vendored
 #      in this repo (license); it lives in ~/.hermes/msn-server.
 #   2. Creates a Python venv and installs its dependencies.
-#   3. Writes settings_local.py pointing every redirect at the ZBook LAN IP.
+#   3. Writes settings_local.py pointing redirects at the chosen host LAN IP.
 #   4. Creates the SQLite databases (direct create_all — upstream
 #      script/dbcreate.py fails on modern SQLAlchemy).
 #   5. Creates the two local accounts (owner + bot) and writes their
@@ -22,7 +22,7 @@
 #   8. Writes the pre-filled Switcher INI files (with this host's LAN IP)
 #      to ~/.hermes/msn-server/switcher/ for deployment to the XP.
 #
-# SYSTEM REQUIREMENTS (one-time, run as alxtheprogrammer with sudo):
+# SYSTEM REQUIREMENTS (one-time, run by a user authorized to use sudo):
 #   sudo apt-get install -y stunnel4
 #   echo 'net.ipv4.ip_unprivileged_port_start=0' | sudo tee /etc/sysctl.d/99-hermesxp.conf
 #   sudo sysctl -p /etc/sysctl.d/99-hermesxp.conf
@@ -45,10 +45,14 @@ if [ -z "${LAN_IP:-}" ]; then
     [ -z "$LAN_IP" ] && LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 fi
 if [ -z "$LAN_IP" ]; then echo "could not detect LAN IP; set LAN_IP env and re-run"; exit 1; fi
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! python3 "$SCRIPT_DIR/../tools/validate_lan_ip.py" "$LAN_IP"; then
+    echo "LAN_IP must be an RFC1918 LAN IPv4 address; override LAN_IP and re-run" >&2
+    exit 2
+fi
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 SERVER_DIR="$HERMES_HOME/msn-server"
 VENV="$SERVER_DIR/.venv"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BRIDGE_SRC="$(cd "$SCRIPT_DIR/../msn-bridge" && pwd)"
 BRIDGE_DIR="$HERMES_HOME/msn-bridge"
 ENV_FILE="$HERMES_HOME/.env"
@@ -129,7 +133,7 @@ log "msn-server service started"
 # --- 7. TLS terminator (stunnel on :443 for XP HTTPS sign-in) ---
 if ! command -v stunnel >/dev/null; then
     warn "stunnel not installed — :443 TLS listener skipped."
-    warn "Run as alxtheprogrammer: sudo apt-get install -y stunnel4"
+    warn "Install stunnel with your system package manager (Debian: sudo apt-get install -y stunnel4)"
     warn "Then re-run this installer to finish TLS."
 else
     if [ ! -f "$SERVER_DIR/certs/server.pem" ]; then
@@ -143,7 +147,7 @@ else
     systemctl --user daemon-reload
     if [ "$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null || echo 1024)" != "0" ]; then
         warn "ip_unprivileged_port_start is not 0 — user services cannot bind :443."
-        warn "Run as alxtheprogrammer: echo 'net.ipv4.ip_unprivileged_port_start=0' | sudo tee /etc/sysctl.d/99-hermesxp.conf && sudo sysctl -p /etc/sysctl.d/99-hermesxp.conf"
+        warn "As an authorized sudo user: echo 'net.ipv4.ip_unprivileged_port_start=0' | sudo tee /etc/sysctl.d/99-hermesxp.conf && sudo sysctl -p /etc/sysctl.d/99-hermesxp.conf"
         warn "Then: systemctl --user enable --now msn-tls.service"
     else
         systemctl --user enable --now msn-tls.service
@@ -164,7 +168,7 @@ fi
 # --- 8. XP install package (zip) + its LAN download host ---
 # The package (exe + connection config + CA + Switcher DLL + INIs + README)
 # is built from the live server state, so it never contains stale addresses.
-sed -e "s|__HOME__|$HOME|g" "$SCRIPT_DIR/hermes-xp-package.service" > "$HOME/.config/systemd/user/hermes-xp-package.service"
+sed -e "s|__HOME__|$HOME|g" -e "s|__LAN_IP__|$LAN_IP|g" "$SCRIPT_DIR/hermes-xp-package.service" > "$HOME/.config/systemd/user/hermes-xp-package.service"
 # The plugin's root checkout includes the server/build/update code. The
 # updater service therefore never needs a separate ~/HermesXP checkout.
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

@@ -1,6 +1,6 @@
 # HermesXP local server settings (template — __LAN_IP__ is replaced by install.sh).
 # Every redirect the server sends (XFR/RNG switchboard, Nexus login, storage)
-# points at the ZBook LAN IP so the XP client and the bot both reach this box.
+# points at the configured Hermes host LAN IP so XP and the bot reach this server.
 DEBUG = False
 DEBUG_MSNP = False
 DEBUG_HTTP_REQUEST = False

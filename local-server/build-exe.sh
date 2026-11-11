@@ -1,11 +1,11 @@
 #!/bin/bash
-# Build the XP executable (HermesXP.exe) from the GitHub source, on the ZBook.
+# Build the XP executable (HermesXP.exe) from the GitHub source, on a modern host.
 # The XP has no internet and no toolchain, so the build happens here from the
 # public repo checkout; deploy-exe.sh then pushes the result to the XP over
 # the LAN. Called by the update service after a plugin/repo update, or
 # manually after changing xp-client/.
 #
-# Requires the LLVM toolchain (one-time, as alxtheprogrammer):
+# Requires the LLVM toolchain (one-time, with package manager privileges):
 #   sudo apt-get install -y clang lld llvm
 # If the tools are missing, this script prints that command and exits 3
 # (the update service logs it and leaves the old exe in place).
@@ -21,7 +21,7 @@ DIST_DIR="$REPO_ROOT/dist"
 for tool in clang lld-link llvm-objdump python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "[build-exe] missing tool: $tool" >&2
-        echo "[build-exe] install the toolchain once (as alxtheprogrammer): sudo apt-get install -y clang lld llvm" >&2
+        echo "[build-exe] install the toolchain once: sudo apt-get install -y clang lld llvm" >&2
         exit 3
     fi
 done

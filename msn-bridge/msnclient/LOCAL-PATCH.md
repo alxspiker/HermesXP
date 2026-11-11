@@ -61,7 +61,7 @@ behaves exactly as upstream (Escargot).
 
 ## Local defaults used by the HermesXP installer
 
-- `MSN_SERVER_HOST=127.0.0.1` (bot runs on the same ZBook as the server)
+- `MSN_SERVER_HOST=127.0.0.1` (bot runs on the same Hermes host as the server)
 - `MSN_LOGIN_URL=http://127.0.0.1:8081/login` (plain HTTP on loopback; the
   server's HTTP front — no TLS needed for the bot)
 

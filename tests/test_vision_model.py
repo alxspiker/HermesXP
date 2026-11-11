@@ -1,3 +1,5 @@
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +87,117 @@ class VisionModelTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(ValueError):
                 parse_model_detections(raw, width=640, height=360)
 
+    def test_custom_llama_model_and_runtime_paths(self):
+        class FakeProcess:
+            returncode = 0
+
+            def wait(self, timeout):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "my llama-cli"
+            model = root / "custom model.gguf"
+            projector = root / "custom projector.gguf"
+            for file in (binary, model, projector):
+                file.touch()
+            image_path = root / "screen.png"
+            image_path.touch()
+            prompt = "Return only []"
+
+            def fake_popen(command, **kwargs):
+                kwargs["stdout"].write(("\n> " + prompt + "\n[]\n[ Prompt: test ]\n").encode())
+                return FakeProcess()
+
+            with (
+                patch.dict(os.environ, {
+                    "HERMESXP_VISION_BACKEND": "llama-cli",
+                    "HERMESXP_VISION_MODEL": model.name,
+                    "HERMESXP_VISION_MODEL_PATH": str(model),
+                    "HERMESXP_VISION_PROJECTOR_PATH": str(projector),
+                    "HERMESXP_VISION_LLAMA_CLI": str(binary),
+                    "HERMESXP_VISION_THREADS": "2",
+                }),
+                patch("vision_model.subprocess.Popen", side_effect=fake_popen) as popen,
+            ):
+                self.assertEqual(_run_cli(image_path, prompt), "[]")
+        command = popen.call_args.args[0]
+        self.assertEqual(command[command.index("-m") + 1], str(model))
+        self.assertEqual(command[command.index("--mmproj") + 1], str(projector))
+        self.assertEqual(command[command.index("-t") + 1], "2")
+        self.assertEqual(popen.call_args.kwargs["env"]["HOME"], str(Path.home()))
+        self.assertNotIn("HERMESXP_VISION_API_KEY", popen.call_args.kwargs["env"])
+
+    def test_openai_compatible_uses_configured_model_without_live_network(self):
+        raw = '[{"type":"button","text":"OK","bbox":[100,100,300,200],"confidence":0.9}]'
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self, limit):
+                self.limit = limit
+                return json.dumps({"choices": [{"message": {"content": raw}}]}).encode()
+
+        response = FakeResponse()
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                self.request = request
+                self.timeout = timeout
+                return response
+
+        opener = FakeOpener()
+        with (
+            patch.dict(os.environ, {
+                "HERMESXP_VISION_BACKEND": "openai-compatible",
+                "HERMESXP_VISION_API_URL": "http://127.0.0.1:11434/v1/chat/completions",
+                "HERMESXP_VISION_API_MODEL": "other-vision",
+                "HERMESXP_VISION_API_KEY": "sample-secret",
+            }),
+            patch.object(vision_model, "_STATE", {"state": "not-verified", "last_success": None, "error": None}),
+            patch("vision_model.build_opener", return_value=opener) as build,
+        ):
+            detections = infer_lfm3vl(Image.new("RGB", (100, 80), "white"))
+            self.assertEqual(model_status()["model"], "other-vision")
+            self.assertEqual(model_status()["backend"], "openai-compatible")
+
+        self.assertEqual(detections[0]["source"], "other-vision")
+        self.assertEqual(detections[0]["bbox"], [10, 8, 29, 16])
+        payload = json.loads(opener.request.data)
+        self.assertEqual(payload["model"], "other-vision")
+        self.assertTrue(payload["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertEqual(opener.request.get_header("Authorization"), "Bearer sample-secret")
+        self.assertEqual(response.limit, vision_model._MAX_OUTPUT + 1)
+        self.assertIs(build.call_args.args[0], vision_model._NoRedirect)
+
+    def test_remote_plain_http_is_rejected_before_network(self):
+        with (
+            patch.dict(os.environ, {
+                "HERMESXP_VISION_BACKEND": "openai-compatible",
+                "HERMESXP_VISION_API_URL": "http://example.com/v1/chat/completions",
+                "HERMESXP_VISION_API_MODEL": "vision",
+            }),
+            patch("vision_model.build_opener") as opener,
+        ):
+            with self.assertRaisesRegex(ValueError, "plain HTTP"):
+                infer_lfm3vl(Image.new("RGB", (80, 60)))
+            opener.assert_not_called()
+
+    def test_disabling_vision_never_claims_success(self):
+        with (
+            patch.dict(os.environ, {"HERMESXP_VISION_BACKEND": "disabled"}),
+            patch.object(vision_model, "_STATE", {
+                "state": "verified", "last_success": 123.0, "error": None,
+            }),
+        ):
+            self.assertEqual(model_status()["state"], "disabled")
+            self.assertIsNone(model_status()["model"])
+            with self.assertRaisesRegex(RuntimeError, "disabled"):
+                infer_lfm3vl(Image.new("RGB", (80, 60)))
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/.hermes/msn-server/xp-package
 ExecStartPre=/bin/mkdir -p %h/.hermes/msn-server/xp-package
-ExecStart=/usr/bin/python3 -m http.server 18767 --bind 0.0.0.0
+ExecStart=/usr/bin/python3 -m http.server 18767 --bind __LAN_IP__
 Restart=on-failure
 RestartSec=5
 

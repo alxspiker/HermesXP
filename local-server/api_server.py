@@ -2,8 +2,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from PIL import Image
+import hashlib
+import hmac
 import io
 import os
+import threading
+import time
+from collections import deque
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,7 +23,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
-from tools.hermesxp_ui import HermesXPClient, ResponseTooLargeError
+from tools.hermesxp_ui import (
+    HermesXPClient, ResponseTooLargeError, validate_click, validate_drag,
+    validate_key, validate_scroll, validate_text,
+)
 from tools.hermesxp_update import read_registry, UpdateError
 from vision_model import infer_lfm3vl, model_status
 
@@ -50,12 +58,17 @@ async def status():
     else:
         service_summary = "degraded"
     vision = model_status()
+    cua_configured = (
+        32 <= len(os.environ.get("HERMES_CUA_TOKEN", "")) <= 512
+        and bool(os.environ.get("HERMES_CUA_ALLOWED_IP"))
+        and os.environ.get("HERMES_CUA_LIVE_ENABLED") == "1"
+    )
     return {
         "services": service_summary,
         "dashboard": "v0.7",
         "vision": "lfm3-vl" if vision["state"] == "verified" else "heuristic-only",
         "model": vision["model"] or "unavailable",
-        "cua": "simulated-only",
+        "cua": "live-opt-in" if cua_configured else "simulated-only",
         "xp_endpoint": "paired-device-authenticated",
     }
 
@@ -469,41 +482,171 @@ class CUARequestLimitMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StrictBool, StrictInt, model_validator
 from typing import Literal, Optional
+
+_CUA_MOUSE_ACTIONS = frozenset({
+    "click_ok", "close_window", "click", "right_click", "double_click", "scroll", "drag",
+})
+
+
 class CUACommand(BaseModel):
     action: Literal["click_ok", "close_window", "click", "right_click", "double_click", "type_text", "key_press", "scroll", "drag"]
-    coords: Optional[tuple[int, int]] = None
-    text: Optional[str] = Field(default=None, max_length=256)
+    coords: Optional[tuple[StrictInt, StrictInt]] = None
+    end_coords: Optional[tuple[StrictInt, StrictInt]] = None
+    delta: Optional[StrictInt] = None
+    text: Optional[str] = Field(default=None, max_length=128)
     token: str = Field(min_length=32, max_length=512)
+    confirm_live: StrictBool = False
+    device: Optional[str] = Field(default=None, max_length=80)
 
     @model_validator(mode="after")
-    def validate_coordinates(self):
+    def validate_command_shape(self):
         if self.coords is not None and any(value < 0 or value > 8192 for value in self.coords):
             raise ValueError("coordinates must be between 0 and 8192")
+        if self.end_coords is not None and any(value < 0 or value > 8192 for value in self.end_coords):
+            raise ValueError("end coordinates must be between 0 and 8192")
+        if self.action in _CUA_MOUSE_ACTIONS and self.coords is None:
+            raise ValueError(f"{self.action} requires coordinates")
+        if self.action == "drag" and self.end_coords is None:
+            raise ValueError("drag requires end_coords")
+        if self.action != "drag" and self.end_coords is not None:
+            raise ValueError("end_coords is only allowed for drag")
+        if self.action == "scroll":
+            if self.delta is None or self.delta == 0 or not -5 <= self.delta <= 5:
+                raise ValueError("scroll delta must be between -5 and -1 or 1 and 5")
+        elif self.delta is not None:
+            raise ValueError("delta is only allowed for scroll")
+        if self.action in {"type_text", "key_press"}:
+            if not self.text:
+                raise ValueError(f"{self.action} requires text")
+        elif self.text is not None:
+            raise ValueError("text is not allowed for this action")
         return self
+
+
+def _screen_dimensions(response: str) -> tuple[int, int]:
+    fields = dict(re.findall(r"\b(width|height)=([0-9]{1,5})\b", response))
+    if set(fields) != {"width", "height"}:
+        raise HTTPException(status_code=502, detail="Paired XP did not report screen dimensions")
+    width, height = int(fields["width"]), int(fields["height"])
+    if not 1 <= width <= 8192 or not 1 <= height <= 8192:
+        raise HTTPException(status_code=502, detail="Paired XP reported invalid screen dimensions")
+    return width, height
+
+
+def _cua_rate_limited(peer: str, token: str) -> bool:
+    """Allow at most ten authenticated CUA requests per identity in five seconds."""
+    key = (peer, hashlib.sha256(token.encode("utf-8")).hexdigest())
+    now = time.monotonic()
+    with _CUA_RATE_LOCK:
+        for old_key, timestamps in list(_CUA_ACTION_TIMES.items()):
+            while timestamps and now - timestamps[0] >= _CUA_RATE_WINDOW:
+                timestamps.popleft()
+            if not timestamps:
+                del _CUA_ACTION_TIMES[old_key]
+        timestamps = _CUA_ACTION_TIMES.setdefault(key, deque())
+        if len(timestamps) >= _CUA_RATE_LIMIT:
+            return True
+        timestamps.append(now)
+        if len(_CUA_ACTION_TIMES) > 128:
+            _CUA_ACTION_TIMES.pop(next(iter(_CUA_ACTION_TIMES)))
+        return False
+
+
+_CUA_RATE_LIMIT = 10
+_CUA_RATE_WINDOW = 5.0
+_CUA_RATE_LOCK = threading.Lock()
+_CUA_ACTION_TIMES: dict[tuple[str, str], deque[float]] = {}
+
 
 @app.post("/api/cua/execute")
 async def execute_cua_command(cmd: CUACommand, request: Request):
-    """Authenticate against host-configured secret and exact allowed peer; log only, never execute."""
+    """Authenticate a bounded UI action; live execution is opt-in and paired-device only."""
     expected_token = os.environ.get("HERMES_CUA_TOKEN")
     allowed_ip = os.environ.get("HERMES_CUA_ALLOWED_IP")
-    if not expected_token or len(expected_token) < 32 or not allowed_ip:
+    if expected_token is None or not 32 <= len(expected_token) <= 512 or not allowed_ip:
         raise HTTPException(status_code=503, detail="CUA is not configured")
     if request.client is None or request.client.host != allowed_ip:
         raise HTTPException(status_code=403, detail="Source IP not allowed")
-    if not __import__("hmac").compare_digest(cmd.token, expected_token):
+    if not hmac.compare_digest(cmd.token.encode("utf-8"), expected_token.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid token")
-    if cmd.action in {"type_text", "key_press"} and not cmd.text:
-        raise HTTPException(status_code=422, detail="This action requires text")
-    if cmd.action not in {"type_text", "key_press"} and cmd.text is not None:
-        raise HTTPException(status_code=422, detail="Text is not allowed for this action")
-    if cmd.action in {"drag", "scroll"} and cmd.coords is None:
-        raise HTTPException(status_code=422, detail=f"{cmd.action} requires coordinates")
-    print(f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} - AUTHORIZED; simulated only")
-    return {"status": "accepted", "action": cmd.action, "coords": cmd.coords,
-            "text": cmd.text, "executed": False,
-            "note": "Authenticated request validated and logged. Live XP execution is disabled."}
+
+    if os.environ.get("HERMES_CUA_LIVE_ENABLED") != "1" or not cmd.confirm_live:
+        print(f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} - AUTHORIZED; simulated only")
+        return {
+            "status": "accepted", "action": cmd.action, "coords": cmd.coords,
+            "text": cmd.text, "executed": False, "verified": False, "device": None,
+            "note": "Authenticated request validated. Live XP execution requires server opt-in and confirm_live=true.",
+        }
+
+    if _cua_rate_limited(request.client.host, cmd.token):
+        raise HTTPException(status_code=429, detail="CUA action rate limit exceeded", headers={"Retry-After": "5"})
+
+    try:
+        device_name = cmd.device or os.environ.get("HERMES_CUA_DEVICE")
+        device = resolve_paired_device(read_registry(), device_name)
+    except HTTPException:
+        raise
+    except (OSError, ValueError, KeyError, TypeError, UpdateError) as exc:
+        raise HTTPException(status_code=503, detail="Paired-device registry is unavailable") from exc
+
+    try:
+        client = HermesXPClient(device["host"], device["token"], port=device["port"], timeout=5.0)
+        expected_ack: str
+        if cmd.action in _CUA_MOUSE_ACTIONS:
+            width, height = _screen_dimensions(client.inspect())
+            assert cmd.coords is not None
+            x, y = cmd.coords
+            if cmd.action in {"click_ok", "close_window", "click"}:
+                validate_click(x, y, width, height, "left")
+                acknowledgement = client.click(x, y, width, height, "left")
+                expected_ack = "clicked"
+            elif cmd.action == "right_click":
+                validate_click(x, y, width, height, "right")
+                acknowledgement = client.click(x, y, width, height, "right")
+                expected_ack = "clicked"
+            elif cmd.action == "double_click":
+                validate_click(x, y, width, height, "left")
+                acknowledgement = client.double_click(x, y, width, height)
+                expected_ack = "double-clicked"
+            elif cmd.action == "drag":
+                assert cmd.end_coords is not None
+                x2, y2 = cmd.end_coords
+                validate_drag(x, y, x2, y2, width, height)
+                acknowledgement = client.drag(x, y, x2, y2, width, height)
+                expected_ack = "dragged"
+            else:
+                assert cmd.delta is not None
+                validate_scroll(x, y, width, height, cmd.delta)
+                acknowledgement = client.scroll(x, y, width, height, cmd.delta)
+                expected_ack = "scrolled"
+        elif cmd.action == "type_text":
+            assert cmd.text is not None
+            validate_text(cmd.text)
+            acknowledgement = client.type_text(cmd.text)
+            expected_ack = "typed"
+        else:
+            assert cmd.text is not None
+            validate_key(cmd.text)
+            acknowledgement = client.key(cmd.text)
+            expected_ack = "key sent"
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="CUA action parameters are invalid for the paired device") from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="Paired XP action could not be verified") from exc
+
+    if not isinstance(acknowledgement, str) or acknowledgement.strip() != expected_ack:
+        raise HTTPException(status_code=502, detail="Paired XP did not acknowledge the requested action")
+    print(f"{datetime.now().isoformat()} - CUA {cmd.action} at {cmd.coords} - verified by paired device {device['name']}")
+    return {
+        "status": "success", "action": cmd.action, "coords": cmd.coords,
+        "end_coords": cmd.end_coords, "delta": cmd.delta,
+        "executed": True, "verified": True, "device": str(device["name"])[:80],
+        "note": "The paired XP host acknowledged the requested UI action.",
+    }
 
 app.add_middleware(CUARequestLimitMiddleware)
 

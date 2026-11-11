@@ -133,6 +133,20 @@ class TestVisionAPI(unittest.TestCase):
         self.assertEqual(result["model"], "unavailable")
         self.assertEqual(result["cua"], "simulated-only")
 
+    def test_status_reports_live_cua_opt_in_only_with_auth_configuration(self):
+        import os
+        configured = {
+            "HERMES_CUA_TOKEN": "s" * 32,
+            "HERMES_CUA_ALLOWED_IP": "127.0.0.1",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        dashboard = {"services": [], "diagnostics": {"systemd": "available"}}
+        with patch.dict(os.environ, configured), \
+             patch("api_server.dashboard_status", return_value=dashboard), \
+             patch("api_server.model_status", return_value={"state": "unavailable", "model": None}):
+            result = TestClient(app).get("/api/status").json()
+        self.assertEqual(result["cua"], "live-opt-in")
+
     def test_generate_heuristic_suggestions_returns_proportional_coords_for_various_sizes(self):
         from api_server import generate_heuristic_suggestions
         for w, h in [(800, 600), (1024, 768), (640, 480)]:
@@ -232,12 +246,25 @@ class TestVisionAPI(unittest.TestCase):
         os.environ["HERMES_CUA_ALLOWED_IP"] = "testclient"
         try:
             response = TestClient(app).post("/api/cua/execute", json={
-                "action": "click", "token": "x" * 32
+                "action": "click", "coords": [1, 1], "token": "x" * 32
             })
             self.assertEqual(response.status_code, 503)
         finally:
             os.environ.pop("HERMES_CUA_TOKEN", None)
             os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_auth_handles_utf8_secret_safely(self):
+        import os
+        token = "é" * 32
+        with patch.dict(os.environ, {
+            "HERMES_CUA_TOKEN": token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+        }):
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "click", "coords": [1, 1], "token": token,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["executed"])
 
     def test_cua_accepts_authenticated_action_only_as_simulation(self):
         import os
@@ -255,6 +282,215 @@ class TestVisionAPI(unittest.TestCase):
         finally:
             os.environ.pop("HERMES_CUA_TOKEN", None)
             os.environ.pop("HERMES_CUA_ALLOWED_IP", None)
+
+    def test_cua_routes_live_click_through_authenticated_paired_fixture(self):
+        import os
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        browser_token = "s" * 32
+        device_token = "d" * 64
+        received = []
+
+        class XPFixture(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append((self.command, self.path, self.headers.get("X-Hermes-Token"), b""))
+                body = b"width=800 height=600 title=Fixture"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                received.append((self.command, self.path, self.headers.get("X-Hermes-Token"), body))
+                reply = b"clicked"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), XPFixture)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        env = {
+            "HERMES_CUA_TOKEN": browser_token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+            "HERMES_CUA_DEVICE": "Fixture",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        registry = [{"name": "Fixture", "host": "127.0.0.1",
+                     "token": device_token, "port": server.server_port}]
+        try:
+            with (
+                patch.dict(os.environ, env),
+                patch("api_server.read_registry", return_value=registry),
+            ):
+                client = TestClient(app)
+                simulated = client.post("/api/cua/execute", json={
+                    "action": "click", "coords": [13, 27], "token": browser_token,
+                })
+                executed = client.post("/api/cua/execute", json={
+                    "action": "click", "coords": [13, 27], "token": browser_token,
+                    "confirm_live": True,
+                })
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+            server.server_close()
+        self.assertEqual(simulated.status_code, 200)
+        self.assertFalse(simulated.json()["executed"])
+        self.assertEqual(executed.status_code, 200, executed.text)
+        self.assertTrue(executed.json()["executed"])
+        self.assertTrue(executed.json()["verified"])
+        self.assertEqual(executed.json()["device"], "Fixture")
+        self.assertNotIn(device_token, executed.text)
+        self.assertEqual(received, [
+            ("GET", "/ui/inspect", device_token, b""),
+            ("POST", "/ui/click", device_token, b"x=13&y=27&button=left"),
+        ])
+
+    def test_cua_dispatches_mouse_actions_with_verified_acknowledgements(self):
+        import os
+        token = "s" * 32
+        registry = [{"name": "Lab", "host": "127.0.0.1", "token": "d" * 64, "port": 18768}]
+        env = {
+            "HERMES_CUA_TOKEN": token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+            "HERMES_CUA_DEVICE": "Lab",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        with (
+            patch.dict(os.environ, env),
+            patch("api_server.read_registry", return_value=registry),
+            patch("api_server.HermesXPClient") as client_class,
+        ):
+            xp = client_class.return_value
+            xp.inspect.return_value = "width=800 height=600 title=Fixture"
+            xp.double_click.return_value = "double-clicked"
+            xp.drag.return_value = "dragged"
+            xp.scroll.return_value = "scrolled"
+            client = TestClient(app)
+            replies = [
+                client.post("/api/cua/execute", json={
+                    "action": "double_click", "coords": [5, 6], "token": token, "confirm_live": True,
+                }),
+                client.post("/api/cua/execute", json={
+                    "action": "drag", "coords": [1, 2], "end_coords": [10, 20],
+                    "token": token, "confirm_live": True,
+                }),
+                client.post("/api/cua/execute", json={
+                    "action": "scroll", "coords": [5, 6], "delta": -2,
+                    "token": token, "confirm_live": True,
+                }),
+            ]
+        self.assertEqual([reply.status_code for reply in replies], [200, 200, 200])
+        self.assertTrue(all(reply.json()["verified"] for reply in replies))
+        xp.double_click.assert_called_once_with(5, 6, 800, 600)
+        xp.drag.assert_called_once_with(1, 2, 10, 20, 800, 600)
+        xp.scroll.assert_called_once_with(5, 6, 800, 600, -2)
+
+    def test_cua_live_type_text_ack_does_not_echo_sensitive_payload(self):
+        import os
+        token = "t" * 32
+        typed_text = "sensitive-example"
+        registry = [{"name": "Lab", "host": "127.0.0.1", "token": "d" * 64, "port": 18768}]
+        env = {
+            "HERMES_CUA_TOKEN": token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+            "HERMES_CUA_DEVICE": "Lab",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        with (
+            patch.dict(os.environ, env),
+            patch("api_server.read_registry", return_value=registry),
+            patch("api_server.HermesXPClient") as client_class,
+        ):
+            xp = client_class.return_value
+            xp.type_text.return_value = "typed"
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "type_text", "text": typed_text, "token": token, "confirm_live": True,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["verified"])
+        self.assertNotIn(typed_text, response.text)
+
+    def test_cua_rejects_non_text_host_acknowledgement(self):
+        import os
+        token = "n" * 32
+        registry = [{"name": "Lab", "host": "127.0.0.1", "token": "d" * 64, "port": 18768}]
+        env = {
+            "HERMES_CUA_TOKEN": token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+            "HERMES_CUA_DEVICE": "Lab",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        with (
+            patch.dict(os.environ, env),
+            patch("api_server.read_registry", return_value=registry),
+            patch("api_server.HermesXPClient") as client_class,
+        ):
+            xp = client_class.return_value
+            xp.inspect.return_value = "width=800 height=600 title=Fixture"
+            xp.click.return_value = None
+            response = TestClient(app, raise_server_exceptions=False).post("/api/cua/execute", json={
+                "action": "click", "coords": [5, 6], "token": token, "confirm_live": True,
+            })
+        self.assertEqual(response.status_code, 502)
+        self.assertNotEqual(response.json().get("status"), "success")
+
+    def test_cua_rate_limits_live_actions_per_auth_identity(self):
+        import os
+        token = "r" * 32
+        registry = [{"name": "Lab", "host": "127.0.0.1", "token": "d" * 64, "port": 18768}]
+        env = {
+            "HERMES_CUA_TOKEN": token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+            "HERMES_CUA_DEVICE": "Lab",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        with (
+            patch.dict(os.environ, env),
+            patch("api_server.read_registry", return_value=registry),
+            patch("api_server.HermesXPClient") as client_class,
+        ):
+            xp = client_class.return_value
+            xp.inspect.return_value = "width=800 height=600 title=Fixture"
+            xp.click.return_value = "clicked"
+            client = TestClient(app)
+            replies = [client.post("/api/cua/execute", json={
+                "action": "click", "coords": [5, 6], "token": token, "confirm_live": True,
+            }) for _ in range(11)]
+        self.assertEqual([reply.status_code for reply in replies[:10]], [200] * 10)
+        self.assertEqual(replies[10].status_code, 429)
+        self.assertEqual(xp.click.call_count, 10)
+
+    def test_cua_rejects_live_action_with_unexpected_host_ack(self):
+        import os
+        token = "s" * 32
+        registry = [{"name": "Lab", "host": "127.0.0.1", "token": "d" * 64, "port": 18768}]
+        env = {
+            "HERMES_CUA_TOKEN": token,
+            "HERMES_CUA_ALLOWED_IP": "testclient",
+            "HERMES_CUA_DEVICE": "Lab",
+            "HERMES_CUA_LIVE_ENABLED": "1",
+        }
+        with (
+            patch.dict(os.environ, env),
+            patch("api_server.read_registry", return_value=registry),
+            patch("api_server.HermesXPClient") as client_class,
+        ):
+            xp = client_class.return_value
+            xp.inspect.return_value = "width=800 height=600 title=Fixture"
+            xp.click.return_value = "unexpected"
+            response = TestClient(app).post("/api/cua/execute", json={
+                "action": "click", "coords": [5, 6], "token": token, "confirm_live": True,
+            })
+        self.assertEqual(response.status_code, 502)
+        self.assertNotEqual(response.json().get("status"), "success")
 
     def test_cua_rejects_declared_oversized_body(self):
         from fastapi.testclient import TestClient

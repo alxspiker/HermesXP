@@ -16,7 +16,7 @@ class TestVisionAPI(unittest.TestCase):
         image.save(buffer, format="BMP")
         return buffer.getvalue()
 
-    def test_analyze_endpoint_returns_lfm_or_heuristic_suggestions(self):
+    def test_analyze_endpoint_reports_heuristics_without_fabricated_detection(self):
         response = MagicMock()
         response.content = self.bmp_bytes()
         response.raise_for_status.return_value = None
@@ -24,19 +24,23 @@ class TestVisionAPI(unittest.TestCase):
             result = TestClient(app).get("/api/analyze").json()
 
         self.assertEqual(result["status"], "success")
-        self.assertIn(result["analysis_mode"], ["local-multimodal", "heuristic"])
+        self.assertEqual(result["analysis_mode"], "heuristic")
         self.assertEqual(result["screenshot_size"], "80x60")
         self.assertEqual(result["suggestions"][0]["coords"], [62, 45])
-        self.assertGreaterEqual(len(result.get("detected", [])), 0)
+        self.assertNotIn("detected", result)
+        self.assertIn("unavailable", result["note"].lower())
         for suggestion in result["suggestions"]:
-            expected_keys = {"action", "coords", "confidence", "reason"}
-            if "lmf_reason" in suggestion:
-                expected_keys.add("lmf_reason")
-            self.assertTrue(expected_keys.issubset(set(suggestion)))
+            self.assertNotIn("lmf_reason", suggestion)
+            self.assertIn("action", suggestion)
+            self.assertIn("reason", suggestion)
             self.assertTrue(0 <= suggestion["coords"][0] < 80)
             self.assertTrue(0 <= suggestion["coords"][1] < 60)
-            if result["analysis_mode"] == "local-multimodal":
-                self.assertIn("Simulated LFM detection", suggestion.get("lmf_reason", ""))
+
+    def test_status_reports_model_unavailable_and_simulated_cua(self):
+        result = TestClient(app).get("/api/status").json()
+        self.assertEqual(result["vision"], "heuristic-only")
+        self.assertEqual(result["model"], "unavailable")
+        self.assertEqual(result["cua"], "simulated-only")
 
     def test_generate_heuristic_suggestions_returns_proportional_coords_for_various_sizes(self):
         from api_server import generate_heuristic_suggestions

@@ -19,7 +19,7 @@ async def root():
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.6", "vision": "lfm3-vl-active-with-heuristic-fallback", "cua": "vision-driven-simulated", "xp_endpoint": "screenshot-only-auth-cua-ready"}
+    return {"services": "active", "dashboard": "v0.7", "vision": "heuristic-only", "model": "unavailable", "cua": "simulated-only", "xp_endpoint": "screenshot-only-auth-cua-ready"}
 
 def generate_heuristic_suggestions(width: int, height: int) -> list:
     """Pure function for heuristic CUA suggestions. Testable independently.
@@ -86,29 +86,15 @@ async def analyze_screenshot():
         width, height = img.size
         suggestions = generate_heuristic_suggestions(width, height)
         
-        # Real LFM/local_multimodal integration (stubbed call to vision backend with fallback)
-        # In production: call local_multimodal tool or LFM3-VL CLI with LD_LIBRARY_PATH
-        # for image description + CUA coord extraction. Fallback to heuristic for safety.
-        try:
-            # Placeholder for actual local_multimodal.vision_analyze or CLI call
-            # e.g. result = vision_analyze(image=img, question="Describe UI elements, suggest CUA clicks with coords")
-            analysis_mode = "local-multimodal"
-            note = "Real LFM3-VL backend integrated via local_multimodal (LD_LIBRARY_PATH + vision_analyze proxy). Suggestions now driven by model where available; fallback to heuristic. #9/#1 substantial advance toward live authenticated CUA with real vision coords. Host-side only."
-            # Enhance suggestions with 'lmf_reason' when real
-            for s in suggestions:
-                s["lmf_reason"] = "Simulated LFM detection: " + s.get("reason", "")
-        except Exception:
-            analysis_mode = "heuristic"
-            note = "Fallback to pure heuristic (local_multimodal unavailable)."
-
+        # Model integration is not implemented in this server process. Keep the
+        # output explicitly heuristic rather than inventing detections.
         analysis = {
             "status": "success",
-            "analysis_mode": analysis_mode,
+            "analysis_mode": "heuristic",
             "timestamp": datetime.now().isoformat(),
             "screenshot_size": f"{width}x{height}",
-            "detected": ["dialog", "button", "titlebar"],  # simulated from LFM
             "suggestions": suggestions,
-            "note": note
+            "note": "Heuristic coordinate estimates only; visual model integration is unavailable. Suggestions are not detected UI elements."
         }
         return JSONResponse(analysis)
     except Exception as e:

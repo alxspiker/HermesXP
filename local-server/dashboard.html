@@ -34,7 +34,7 @@
     </div>
 
     <div class="card">
-        <h2>XP Screenshot + Vision Ready (#9)</h2>
+        <h2>XP Screenshot + Heuristic Estimates (#9)</h2>
         <button onclick="captureScreenshot()">Capture & Analyze Screenshot</button>
         <img id="screenshot" style="display: none;">
         <div id="vision-summary" class="log"></div>
@@ -42,7 +42,7 @@
 
     <div class="card">
         <h2>Remote CUA Control (#1) - Authenticated</h2>
-        <p class="status-good">Vision suggests coords. Token-protected endpoint. Simulated only (no live XP without OK).</p>
+        <p class="status-warn">Coordinates are heuristic estimates, not visual detections. CUA endpoint validates/logs only; it never controls XP.</p>
         <label for="cua-token">CUA access token:</label>
         <input id="cua-token" type="password" autocomplete="off" placeholder="Enter configured token">
         <button onclick="executeCUA('click_ok', [620,450])">Execute Click OK (demo)</button>
@@ -138,7 +138,7 @@
 
         window.onload = function() {
             startPolling();
-            console.log('HermesXP dashboard v0.6 loaded; LFM3-VL backend active with vision-driven CUA suggestions (simulated execution). #9/#1 burn progressing safely.');
+            console.log('HermesXP dashboard v0.7 loaded; heuristic screenshot estimates only; model unavailable and CUA is simulated-only.');
         };
     </script>
 </body>

@@ -1,145 +1,199 @@
-<!DOCTYPE html>
-<html>
+<!doctype html>
+<html lang="en">
 <head>
-    <title>HermesXP Management Dashboard</title>
-    <style>
-        body { font-family: 'Courier New', monospace; margin: 0; background: #0a0a0a; color: #0f0; padding: 20px; }
-        .header { background: #111; padding: 15px; border-bottom: 2px solid #0f0; margin-bottom: 20px; }
-        .card { background: #111; padding: 20px; margin: 15px 0; border: 1px solid #0f0; border-radius: 4px; box-shadow: 0 0 10px rgba(0,255,0,0.1); }
-        button { background: #020; color: #0f0; border: 1px solid #0f0; padding: 10px 15px; margin: 5px; cursor: pointer; font-family: inherit; }
-        button:hover { background: #040; }
-        .status-good { color: #0f0; }
-        .status-warn { color: #ff0; }
-        #screenshot { max-width: 100%; border: 2px solid #0f0; margin-top: 10px; image-rendering: pixelated; }
-        .log { font-size: 0.9em; max-height: 200px; overflow-y: auto; background: #000; padding: 10px; }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>HermesXP Management Dashboard</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #10131a; color: #e7ebf3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 1.25rem; }
+    main { width: min(1100px, 100%); margin: auto; }
+    header, section { background: #191e28; border: 1px solid #303949; border-radius: 12px; padding: 1rem 1.2rem; margin-bottom: 1rem; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+    h1 { font-size: clamp(1.35rem, 4vw, 2rem); margin: 0; }
+    h2 { font-size: 1.15rem; margin: 0 0 .75rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 1rem; }
+    .grid section { margin: 0; min-width: 0; }
+    button, select { background: #232c3a; color: inherit; border: 1px solid #53647d; border-radius: 7px; padding: .65rem .8rem; font: inherit; }
+    button { cursor: pointer; }
+    button:hover { background: #303c50; }
+    button:focus-visible, select:focus-visible { outline: 2px solid #74c7ff; outline-offset: 2px; }
+    .controls { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+    .row { border-top: 1px solid #303949; padding: .55rem 0; overflow-wrap: anywhere; }
+    .state { font-weight: 650; }
+    .good { color: #80e2a5; } .warn { color: #ffd27a; } .bad { color: #ff9292; }
+    .muted { color: #aab5c5; }
+    #screenshot { display: block; max-width: 100%; height: auto; margin-top: .8rem; border: 1px solid #53647d; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; background: #10131a; border-radius: 8px; padding: .8rem; }
+    @media (max-width: 560px) { body { padding: .7rem; } header, section { padding: .85rem; } button, select { width: 100%; } .controls { align-items: stretch; } }
+  </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🟢 HermesXP MSN Bridge Dashboard</h1>
-        <p id="last-updated">Last updated: --</p>
-        <div>Advancing #4 - Interactive host-side management. Safe polling only. No XP commands without OK.</div>
-    </div>
+<main>
+  <header>
+    <div><h1>HermesXP Dashboard</h1><div id="last-updated" class="muted">Loading observed host status…</div></div>
+    <button id="refresh">Refresh status</button>
+  </header>
 
-    <div class="card">
-        <h2>Service Status</h2>
-        <div id="services">Loading services...</div>
-        <button onclick="refreshStatus()">Refresh All</button>
-    </div>
+  <div class="grid">
+    <section aria-labelledby="services-title">
+      <h2 id="services-title">Host services and MSN</h2>
+      <div id="services" aria-live="polite">Waiting for API…</div>
+    </section>
+    <section aria-labelledby="devices-title">
+      <h2 id="devices-title">Paired XP devices</h2>
+      <p class="muted">Registry membership is not a live device check. Probing contacts each paired device’s authenticated, read-only status endpoint.</p>
+      <div id="paired-devices" aria-live="polite">Waiting for registry…</div>
+      <div class="controls"><button id="probe-devices">Probe paired devices</button></div>
+      <div id="device-results" aria-live="polite"></div>
+    </section>
+    <section aria-labelledby="screen-title">
+      <h2 id="screen-title">XP screenshot and vision</h2>
+      <div class="controls"><select id="device-select" aria-label="Paired XP device"><option value="">Select a paired device</option></select><button id="capture">Capture and analyze</button></div>
+      <div id="screen-message" class="muted" aria-live="polite">A screenshot is fetched only after you request it.</div>
+      <img id="screenshot" alt="Latest screenshot from the selected paired XP device" hidden>
+      <pre id="analysis" hidden></pre>
+    </section>
+    <section aria-labelledby="updates-title">
+      <h2 id="updates-title">Update status</h2>
+      <div id="update-status" class="muted">Waiting for update metadata…</div>
+    </section>
+    <section aria-labelledby="diagnostics-title">
+      <h2 id="diagnostics-title">Diagnostics</h2>
+      <div id="diagnostics" class="muted">Waiting for host diagnostics…</div>
+    </section>
+  </div>
+</main>
+<script>
+  const byId = id => document.getElementById(id);
+  let screenshotUrl = null;
+  const serviceLabels = {
+    "msn-server": "MSN server", "msn-tls": "MSN TLS", "msn-bridge": "MSN bridge",
+    "talk-voice": "Hermes Talk voice", "xp-discovery": "XP discovery",
+    "xp-update": "XP update timer", "xp-package-server": "XP package server"
+  };
 
-    <div class="card">
-        <h2>Paired Bots & MSN</h2>
-        <div id="bots">Loading bots...</div>
-        <button onclick="listBots()">List Active Bots</button>
-    </div>
+  function addRow(parent, label, value, state = "") {
+    const row = document.createElement("div");
+    row.className = "row";
+    const name = document.createElement("strong");
+    name.textContent = label + ": ";
+    const detail = document.createElement("span");
+    detail.textContent = value;
+    detail.className = "state " + state;
+    row.append(name, detail);
+    parent.append(row);
+  }
 
-    <div class="card">
-        <h2>XP Screenshot + Heuristic Estimates (#9)</h2>
-        <button onclick="captureScreenshot()">Capture & Analyze Screenshot</button>
-        <img id="screenshot" style="display: none;">
-        <div id="vision-summary" class="log"></div>
-    </div>
+  async function request(url, options) {
+    const response = await fetch(url, options);
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error("HTTP " + response.status + (detail ? ": " + detail.slice(0, 180) : ""));
+    }
+    return response;
+  }
 
-    <div class="card">
-        <h2>Remote CUA Control (#1) - Authenticated</h2>
-        <p class="status-warn">Coordinates are heuristic estimates, not visual detections. CUA endpoint validates/logs only; it never controls XP.</p>
-        <label for="cua-token">CUA access token:</label>
-        <input id="cua-token" type="password" autocomplete="off" placeholder="Enter configured token">
-        <button onclick="executeCUA('click_ok', [620,450])">Execute Click OK (demo)</button>
-        <button onclick="executeCUA('close_window', [780,60])">Execute Close Window (demo)</button>
-        <div id="cua-log" class="log">CUA actions will appear here (authenticated & logged).</div>
-    </div>
+  async function refreshStatus() {
+    const statusBox = byId("services");
+    statusBox.textContent = "Checking host services…";
+    try {
+      const response = await request("/api/dashboard/status", { cache: "no-store" });
+      const data = await response.json();
+      statusBox.replaceChildren();
+      for (const service of data.services || []) {
+        const ports = (service.ports || []).map(p => p.port + " " + (p.reachable ? "reachable" : "unreachable")).join(", ");
+        const detail = service.state + (service.sub_state && service.sub_state !== "unknown" ? " / " + service.sub_state : "") + (ports ? " · " + ports : "");
+        const state = service.state === "active" && (service.ports || []).every(p => p.reachable) ? "good" : (service.state === "failed" ? "bad" : "warn");
+        addRow(statusBox, serviceLabels[service.id] || service.id, detail, state);
+      }
+      const paired = byId("paired-devices");
+      paired.replaceChildren();
+      const select = byId("device-select");
+      const previousSelection = select.value;
+      select.replaceChildren(new Option("Select a paired device", ""));
+      for (const device of data.devices || []) {
+        addRow(paired, device.name, device.state, "muted");
+        select.add(new Option(device.name, device.name));
+      }
+      if ([...select.options].some(option => option.value === previousSelection)) select.value = previousSelection;
+      if (!data.devices || data.devices.length === 0) addRow(paired, "Registry", "No devices available", "warn");
+      renderUpdate(data.update || {});
+      renderDiagnostics(data.diagnostics || {});
+      byId("last-updated").textContent = "Observed at " + new Date(data.timestamp).toLocaleString();
+    } catch (error) {
+      statusBox.textContent = "Status request failed: " + error.message;
+      byId("last-updated").textContent = "Live status unavailable";
+    }
+  }
 
-    <div class="card">
-        <h2>Bridge Logs (last 5min)</h2>
-        <pre id="logs" class="log">Loading logs...</pre>
-    </div>
+  function renderUpdate(update) {
+    const box = byId("update-status");
+    box.replaceChildren();
+    addRow(box, "Update state", update.status || "unknown", update.status === "artifacts-ready" ? "good" : "warn");
+    addRow(box, "Installed plugin revision", update.plugin_revision || "unknown");
+    addRow(box, "Verified artifact version", update.artifact_version || "unknown");
+    addRow(box, "XP installer package", update.package_ready ? (update.package_size_bytes + " bytes present") : "not present or unreadable", update.package_ready ? "good" : "warn");
+    addRow(box, "Deployment", update.deployment_claim || "not verified", "muted");
+    const hashes = update.artifact_sha256 || {};
+    for (const [name, hash] of Object.entries(hashes)) addRow(box, name + " SHA-256", hash);
+  }
 
-    <script>
-        let pollInterval;
-        
-        async function fetchAPI(endpoint) {
-            try {
-                const res = await fetch(endpoint);
-                return await res.text();
-            } catch(e) {
-                return 'API not yet implemented - host-side only for now.';
-            }
-        }
+  function renderDiagnostics(diagnostics) {
+    const box = byId("diagnostics");
+    box.replaceChildren();
+    for (const [key, value] of Object.entries(diagnostics)) addRow(box, key.replaceAll("_", " "), String(value), value === "healthy" || value === "available" ? "good" : "muted");
+  }
 
-        async function refreshStatus() {
-            const servicesDiv = document.getElementById('services');
-            servicesDiv.innerHTML = '<p class="status-good">msn-server: ACTIVE (1863)</p><p class="status-good">hermes-msn-bridge: ACTIVE (8081)</p><p class="status-good">XP Discovery: ENABLED</p><p class="status-warn">XP Endpoint: screenshot-only (verified)</p>';
-            document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleTimeString();
-        }
+  async function probeDevices() {
+    if (!window.confirm("Probe all paired XP devices now using their authenticated read-only status endpoint?")) return;
+    const box = byId("device-results");
+    box.textContent = "Probing paired devices…";
+    try {
+      const response = await request("/api/dashboard/devices?confirm=1", {
+        cache: "no-store", headers: { "X-Hermes-Dashboard-Confirm": "user-approved-read-only-probe" }
+      });
+      const data = await response.json();
+      box.replaceChildren();
+      for (const device of data.devices || []) addRow(box, device.name, device.state + (device.verified === undefined ? "" : (device.verified ? " · verified" : " · not verified")), device.state === "online" ? "good" : "warn");
+      if (data.devices_truncated) addRow(box, "Notice", "Only the first eight paired devices were checked", "warn");
+      if (!data.devices || !data.devices.length) addRow(box, "Devices", "No paired devices configured", "muted");
+    } catch (error) { box.textContent = "Device probe failed: " + error.message; }
+  }
 
-        async function listBots() {
-            const botsDiv = document.getElementById('bots');
-            botsDiv.innerHTML = '<p>Escargot bots loaded via manage-bots.py</p><p class="status-good">• MainBot connected</p><p class="status-good">• HermesRelay online</p>';
-        }
+  async function captureAndAnalyze() {
+    const name = byId("device-select").value;
+    if (!name) { byId("screen-message").textContent = "Select a paired device first."; return; }
+    if (!window.confirm("Retrieve a screenshot from " + name + " and run the configured analysis?")) return;
+    const message = byId("screen-message");
+    message.textContent = "Requesting screenshot and analysis…";
+    byId("analysis").hidden = true;
+    try {
+      const query = "?device=" + encodeURIComponent(name);
+      const imageResponse = await request("/api/screenshot" + query, { cache: "no-store" });
+      const blob = await imageResponse.blob();
+      if (screenshotUrl) URL.revokeObjectURL(screenshotUrl);
+      screenshotUrl = URL.createObjectURL(blob);
+      const image = byId("screenshot");
+      image.src = screenshotUrl;
+      image.hidden = false;
+      const analysisResponse = await request("/api/analyze" + query, { cache: "no-store" });
+      const analysis = await analysisResponse.json();
+      byId("analysis").textContent = JSON.stringify(analysis, null, 2);
+      byId("analysis").hidden = false;
+      message.textContent = "Screenshot received; analysis mode: " + (analysis.analysis_mode || analysis.status || "unknown");
+    } catch (error) {
+      message.textContent = "Screenshot or analysis failed: " + error.message;
+    }
+  }
 
-        async function captureScreenshot() {
-            const img = document.getElementById('screenshot');
-            const summary = document.getElementById('vision-summary');
-            img.src = 'http://192.168.1.78:18768/screenshot.bmp?' + Date.now();
-            img.style.display = 'block';
-            
-            try {
-                const analyzeRes = await fetch('/api/analyze');
-                const analysis = await analyzeRes.json();
-                let html = `<strong>Heuristic coordinate suggestions (not visual detections):</strong><br><em>${analysis.note}</em><br>`;
-                html += '<div style="margin:10px 0;">';
-                analysis.suggestions.forEach(s => {
-                    const btnText = s.action.replace('_', ' ').toUpperCase();
-                    const coordStr = s.coords ? ` @ ${s.coords[0]},${s.coords[1]}` : '';
-                    html += `<button onclick="executeCUA('${s.action}', ${JSON.stringify(s.coords)}, ${s.text ? `'${s.text}'` : 'null'})" style="margin:3px;">${btnText}${coordStr}</button>`;
-                });
-                html += '</div>';
-                summary.innerHTML = html;
-            } catch(e) {
-                summary.textContent = 'API analyze failed (server not running on 8082?) - mock coords: click OK @ (620,450). Safe host vision only.';
-            }
-        }
-
-        async function executeCUA(action, coords, text = null) {
-            const cuaLog = document.getElementById('cua-log');
-            const token = document.getElementById('cua-token').value;
-            if (!token) { cuaLog.textContent = 'Enter the configured CUA token first.'; return; }
-            const payload = {action, coords, token};
-            if (text) payload.text = text;
-            try {
-                const res = await fetch('/api/cua/execute', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload)
-                });
-                const result = await res.json();
-                cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: ${result.note}<br>`;
-                cuaLog.scrollTop = cuaLog.scrollHeight;
-            } catch(e) {
-                cuaLog.innerHTML += `<br>${new Date().toLocaleTimeString()}: CUA simulated (server on 8082?): ${action} @ ${coords}${text ? ` text=${text}` : ''}`;
-            }
-        }
-
-        async function loadLogs() {
-            const logsPre = document.getElementById('logs');
-            logsPre.textContent = 'hermes-msn-bridge: Connected to Hermes gateway\nECONNREFUSED on 18764 resolved\nServices stable - 102 tests green\nCUA endpoint added & authenticated.';
-        }
-
-        // Auto-poll
-        function startPolling() {
-            refreshStatus();
-            listBots();
-            loadLogs();
-            pollInterval = setInterval(() => {
-                refreshStatus();
-            }, 10000);
-        }
-
-        window.onload = function() {
-            startPolling();
-            console.log('HermesXP dashboard v0.7 loaded; heuristic screenshot estimates only; model unavailable and CUA is simulated-only.');
-        };
-    </script>
+  byId("refresh").addEventListener("click", refreshStatus);
+  byId("probe-devices").addEventListener("click", probeDevices);
+  byId("capture").addEventListener("click", captureAndAnalyze);
+  refreshStatus();
+  window.setInterval(refreshStatus, 30000);
+</script>
 </body>
 </html>

@@ -4,8 +4,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from PIL import Image
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import ipaddress
+import json
+import re
+import socket
+import subprocess
 import sys
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -17,17 +23,227 @@ from tools.hermesxp_update import read_registry, UpdateError
 
 app = FastAPI(title="HermesXP Vision Dashboard Server")
 
-# Mount static files (dashboard.html)
-app.mount("/static", StaticFiles(directory="."), name="static")
+# Serve bundled UI assets independently of the process working directory.
+app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parent)), name="static")
+
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    with open("dashboard.html", "r") as f:
-        return f.read()
+    dashboard = Path(__file__).resolve().with_name("dashboard.html")
+    return HTMLResponse(dashboard.read_text(encoding="utf-8"))
+
 
 @app.get("/api/status")
 async def status():
-    return {"services": "active", "dashboard": "v0.7", "vision": "heuristic-only", "model": "unavailable", "cua": "simulated-only", "xp_endpoint": "paired-device-authenticated"}
+    # Preserve the legacy shape while deriving the service summary from live
+    # host observations; detailed fields are available at /api/dashboard/status.
+    live = dashboard_status()
+    core = ["msn-server", "msn-tls", "msn-bridge", "talk-voice", "xp-discovery"]
+    service_map = {item["id"]: item for item in live["services"]}
+    if live["diagnostics"]["systemd"] == "unavailable":
+        service_summary = "unknown"
+    elif all(service_map.get(name, {}).get("state") == "active" and
+             all(port["reachable"] for port in service_map.get(name, {}).get("ports", []))
+             for name in core):
+        service_summary = "active"
+    else:
+        service_summary = "degraded"
+    return {"services": service_summary, "dashboard": "v0.7", "vision": "heuristic-only", "model": "unavailable", "cua": "simulated-only", "xp_endpoint": "paired-device-authenticated"}
+
+
+SERVICE_SPECS = (
+    {"id": "msn-server", "unit": "msn-server.service", "ports": (1863, 8081)},
+    {"id": "msn-tls", "unit": "msn-tls.service", "ports": (443,)},
+    {"id": "msn-bridge", "unit": "hermes-msn-bridge.service", "ports": ()},
+    {"id": "talk-voice", "unit": "hermes-xp-voice.service", "ports": ()},
+    {"id": "xp-discovery", "unit": "hermes-xp-discovery.service", "ports": ()},
+    {"id": "xp-update", "unit": "hermes-xp-update.timer", "ports": ()},
+    {"id": "xp-package-server", "unit": "hermes-xp-package.service", "ports": (18767,)},
+)
+
+
+def dashboard_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser()
+
+
+def dashboard_bind_host() -> str:
+    """Default to loopback; only explicit private/loopback addresses are allowed."""
+    configured = os.environ.get("HERMES_DASHBOARD_BIND_HOST", "127.0.0.1")
+    try:
+        address = ipaddress.ip_address(configured)
+    except ValueError as exc:
+        raise RuntimeError("HERMES_DASHBOARD_BIND_HOST must be a private or loopback IP address") from exc
+    if address.is_unspecified or address.is_multicast or not (address.is_loopback or address.is_private):
+        raise RuntimeError("Dashboard binding must be loopback or a private LAN IP; wildcard/public addresses are refused")
+    return str(address)
+
+
+def query_systemd_unit(unit: str) -> dict:
+    """Read an allowlisted unit state using fixed argv and no shell."""
+    result = subprocess.run(
+        ["systemctl", "--user", "show", unit,
+         "--property=LoadState,ActiveState,SubState", "--no-pager"],
+        capture_output=True, text=True, timeout=1.5, check=False,
+    )
+    values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    return {
+        "load_state": values.get("LoadState", "unknown"),
+        "active_state": values.get("ActiveState", "unknown"),
+        "sub_state": values.get("SubState", "unknown"),
+        "query_error": result.returncode != 0,
+    }
+
+
+def probe_local_port(host: str, port: int, *, timeout: float = 0.25) -> bool:
+    """Probe a fixed loopback service port; never accepts a remote host here."""
+    if host != "127.0.0.1" or not (1 <= port <= 65535):
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _update_snapshot(home: Path) -> dict:
+    root = home / "msn-server"
+    active_revision = None
+    revision_file = root / ".xp-active-plugin-revision"
+    try:
+        if revision_file.is_file() and not revision_file.is_symlink() and revision_file.stat().st_size <= 128:
+            value = revision_file.read_text(encoding="ascii").strip()
+            if re.fullmatch(r"[0-9a-f]{40}|unmanaged", value):
+                active_revision = value
+    except (OSError, UnicodeError):
+        pass
+
+    artifact_version = artifact_revision = None
+    artifact_hashes = {}
+    state_file = root / "update-artifacts" / "build-state.json"
+    try:
+        if state_file.is_file() and not state_file.is_symlink() and state_file.stat().st_size <= 65536:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            if isinstance(state, dict):
+                version = state.get("version")
+                revision = state.get("revision")
+                hashes = state.get("sha256")
+                if isinstance(version, str) and re.fullmatch(r"[0-9]+(?:\.[0-9A-Za-z-]+){1,3}", version):
+                    artifact_version = version[:40]
+                if isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40}", revision):
+                    artifact_revision = revision
+                if isinstance(hashes, dict):
+                    for name in ("HermesXP.exe", "HermesXP-Updater.exe"):
+                        digest = hashes.get(name)
+                        if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                            artifact_hashes[name] = digest
+    except (OSError, ValueError, UnicodeError):
+        pass
+
+    package = root / "xp-package" / "HermesXP-Setup.exe"
+    try:
+        package_ready = package.is_file() and not package.is_symlink() and package.stat().st_size > 0
+        package_size = package.stat().st_size if package_ready else None
+    except OSError:
+        package_ready, package_size = False, None
+    complete = bool(artifact_version and artifact_revision and len(artifact_hashes) == 2)
+    return {
+        "status": "artifacts-ready" if complete and package_ready else "incomplete-or-unknown",
+        "plugin_revision": active_revision,
+        "artifact_version": artifact_version,
+        "artifact_revision": artifact_revision,
+        "artifact_sha256": artifact_hashes,
+        "package_ready": package_ready,
+        "package_size_bytes": package_size,
+        "deployment_claim": "not inferred from build artifacts",
+    }
+
+
+def _service_snapshot() -> tuple[list[dict], bool]:
+    output = []
+    errors = 0
+    # Query units concurrently so a stopped user systemd bus is bounded by one
+    # subprocess timeout, rather than the timeout multiplied by unit count.
+    with ThreadPoolExecutor(max_workers=len(SERVICE_SPECS), thread_name_prefix="dashboard-status") as pool:
+        futures = [pool.submit(query_systemd_unit, spec["unit"]) for spec in SERVICE_SPECS]
+        for spec, future in zip(SERVICE_SPECS, futures):
+            try:
+                raw = future.result()
+                if raw.get("query_error"):
+                    errors += 1
+                state = raw.get("active_state", "unknown")
+                state = state if state in {"active", "inactive", "failed", "activating", "deactivating"} else "unknown"
+                ports = [{"port": port, "reachable": probe_local_port("127.0.0.1", port)}
+                         for port in spec["ports"]]
+                output.append({"id": spec["id"], "unit": spec["unit"], "state": state,
+                               "load_state": raw.get("load_state", "unknown"),
+                               "sub_state": raw.get("sub_state", "unknown"), "ports": ports})
+            except Exception:
+                errors += 1
+                output.append({"id": spec["id"], "unit": spec["unit"], "state": "unknown",
+                               "load_state": "unknown", "sub_state": "unknown", "ports": []})
+    return output, errors == 0
+
+
+@app.get("/api/dashboard/status")
+def dashboard_status():
+    services, systemd_available = _service_snapshot()
+    registry_available = True
+    try:
+        registry = read_registry()
+        devices = [{"name": str(device["name"])[:80], "state": "paired; not probed"}
+                   for device in registry[:32]]
+    except (OSError, ValueError, KeyError, TypeError, UpdateError):
+        devices = []
+        registry_available = False
+    home = dashboard_home()
+    active_count = sum(item["state"] == "active" for item in services)
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "services": services,
+        "devices": devices,
+        "devices_truncated": len(devices) == 32,
+        "update": _update_snapshot(home),
+        "diagnostics": {
+            "api": "healthy", "systemd": "available" if systemd_available else "unavailable",
+            "registry": "available" if registry_available else "unavailable",
+            "active_services": active_count, "service_count": len(services),
+        },
+    }
+
+
+def _probe_device(device: dict) -> dict:
+    name = str(device.get("name", "paired device"))[:80]
+    result: dict[str, str | bool] = {"name": name, "state": "offline"}
+    try:
+        response = HermesXPClient(device["host"], device["token"],
+                                  port=device["port"], timeout=2.0).network_status()
+        fields = dict(re.findall(r"\b(discovery_state|verified|win32_error)=([0-9]+)\b", response))
+        if len(fields) != 3:
+            result["state"] = "unknown response"
+        elif fields["win32_error"] != "0" or fields["discovery_state"] != "6" or fields["verified"] != "3":
+            result["state"] = "degraded"
+            result["verified"] = fields["verified"] == "3"
+        else:
+            result["state"] = "online"
+            result["verified"] = True
+    except (TimeoutError, socket.timeout, subprocess.TimeoutExpired):
+        result["state"] = "timeout"
+    except Exception:
+        result["state"] = "offline"
+    return result
+
+
+@app.get("/api/dashboard/devices")
+def dashboard_devices(request: Request, confirm: bool = False):
+    if not confirm or request.headers.get("X-Hermes-Dashboard-Confirm") != "user-approved-read-only-probe":
+        raise HTTPException(status_code=400, detail="Explicit confirmation is required to probe paired XP devices")
+    try:
+        registry = read_registry()
+    except (OSError, ValueError, UpdateError) as exc:
+        raise HTTPException(status_code=503, detail="Paired-device registry is unavailable") from exc
+    devices = [_probe_device(item) for item in registry[:8]]
+    return {"timestamp": datetime.now(timezone.utc).isoformat(), "devices": devices,
+            "devices_truncated": len(registry) > 8}
 
 
 def resolve_paired_device(devices: list[dict], name: str | None) -> dict:
@@ -267,4 +483,4 @@ app.add_middleware(CUARequestLimitMiddleware)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8082)
+    uvicorn.run(app, host=dashboard_bind_host(), port=8082)

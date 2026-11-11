@@ -581,16 +581,9 @@ Vision integration (#9) completed. **Web dashboard (#4) advanced with initial sk
 
 ### Web Management Dashboard (#4)
 
-Open `local-server/dashboard.html` in a browser (or serve with `python -m http.server 8082` from the repo root). 
+Run `python3 local-server/api_server.py` from the plugin checkout, then open `http://127.0.0.1:8082`. The server binds to loopback by default and refuses wildcard/public bind addresses. To make the dashboard reachable from another trusted LAN device, set `HERMES_DASHBOARD_BIND_HOST` to the Hermes host's private interface IP and enforce the LAN firewall; never port-forward 8082 to the public Internet. Use an encrypted tunnel when outside that LAN. Do not substitute `python -m http.server`: the dashboard requires the authenticated host API.
 
-Features:
-- Real-time service status polling (msn-server, bridge, discovery)
-- Bot list integration with manage-bots.py
-- One-click XP screenshot with vision analysis placeholder (integrates #9)
-- Safe log viewer (no arbitrary commands)
-- Dark retro terminal aesthetic matching the project
+The dashboard reads live user-systemd unit states, checks fixed loopback service ports, displays XP update artifact/checksum and package presence without asserting deployment, and reports registry/API diagnostics. Paired XP probes and screenshots require explicit user clicks/confirmation; the browser never receives pairing tokens or connects directly to XP. Unprobed devices are labeled paired, not online. Screenshot analysis displays the API's actual mode (heuristic or configured model) and error responses.
 
-All actions are host-side only. Screenshot uses the verified 18768 endpoint. Full interactive server (FastAPI or stdlib) planned for next iteration. Tests remain 94/94 green.
-
-Updated dashboard.html substantially advances the interactive UI.
+Host-side verification: `PYTHONPATH=local-server python -m unittest discover -s tests -v`. Tests cover status/error handlers, paired-device probe timeouts, token non-disclosure, update metadata, compatibility of the legacy `/api/status` schema, static dashboard wiring, and responsive layout. Fixture tests do not establish live XP behavior; no physical XP was accessed for these changes.
 

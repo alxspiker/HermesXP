@@ -1,8 +1,8 @@
 # Configurable screenshot vision
 
-HermesXP's optional host dashboard can analyze screenshots from authenticated paired XP devices. The image is never sent to a model unless the operator requests analysis. The default backend is **local llama-cli**, and it defaults to LFM3-VL only for compatibility with existing installations; **other compatible vision models are selectable**. The second backend is an explicitly configured **OpenAI-compatible chat completions endpoint** (including locally hosted Ollama or llama.cpp servers). Neither backend is required for MSN messaging, voice, remote control, or pairing.
+HermesXP's native `xp_screen` Hermes tool can optionally analyze screenshots from authenticated paired XP devices. No browser dashboard or HTTP management server is needed. A screenshot is sent to a model only when the tool is invoked with `analyze=true`. The default backend is **local llama-cli**, with LFM3-VL as a compatibility default; other compatible vision models are selectable. The second backend is an explicitly configured **OpenAI-compatible chat completions endpoint** (including locally hosted Ollama or llama.cpp servers). Neither backend is required for MSN messaging, voice, remote control, or pairing.
 
-Set these environment variables in the **host dashboard process** before starting `python3 local-server/api_server.py` (plugin environment settings alone do not automatically configure a separately launched dashboard):
+Configure the following environment variables in the Hermes host/plugin environment; the vision module is imported on demand by the native `xp_screen` tool:
 
 | Variable | Purpose |
 | --- | --- |
@@ -25,7 +25,8 @@ Example: local OpenAI-compatible service (no API key required):
 export HERMESXP_VISION_BACKEND=openai-compatible
 export HERMESXP_VISION_API_URL=http://127.0.0.1:11434/v1/chat/completions
 export HERMESXP_VISION_API_MODEL=your-installed-vision-model
-python3 local-server/api_server.py
+# Restart the Hermes gateway to load the configured plugin environment.
+# Invoke xp_screen with analyze=true; there is no web server to start.
 ```
 
 For local llama-cli, provide a compatible GGUF and projector; model support depends on the particular llama.cpp build. A model switch does not imply every GGUF vision architecture will work. The legacy runtime layout (`bin/llama-b12167/llama-cli`, `models/LFM3-VL-2B-QAD-Q4_0.gguf`, `models/mmproj-LFM3-VL-2B-F16.gguf`) remains the default under the configured runtime root.
@@ -36,4 +37,4 @@ The subprocess uses fixed arguments (no shell), offline mode, a 180-second timeo
 
 **Privacy:** Selecting a remote API sends the XP screenshot, including any visible sensitive content, to that endpoint. The operator is responsible for the model provider's privacy and billing terms. Neither API keys nor model files are sent to XP. Use the local backend or `disabled` if the image must remain on the Hermes host.
 
-The detector validates model output into a maximum of 100 control boxes with normalized coordinates, text, and model-reported confidence; confidence is not calibrated. Heuristic suggestions are kept separate from detections. On failure, the endpoint returns an empty detection list rather than inventing detections. `/api/status` reports a model as verified only after an inference succeeds in that server process. Host-side tests do not substitute for physical XP testing.
+The detector validates model output into at most 100 control boxes with pixel coordinates, text, and model-reported confidence; confidence is not calibrated. On inference failure, `xp_screen` reports vision as unavailable with **no invented detections**. Successful inference is not proof that the predicted coordinates are correct. Host-side tests do not substitute for physical XP testing.

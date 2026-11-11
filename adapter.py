@@ -644,6 +644,69 @@ def register(ctx):
             check_fn=check_requirements,
             emoji="📞",
         )
+        # XP diagnostics, screen capture and bounded controls are native
+        # Hermes tools. They never require a browser dashboard or host API.
+        # The XP client is selected only from the private pairing registry.
+        xp_tools = (
+            (
+                "xp_status", "Read HermesXP host services, update state and paired XP devices. "
+                "Optional probe contacts each XP device read-only.",
+                {"probe": {"type": "boolean", "description": "Probe paired XP devices live (default false)"}},
+                "🖥️",
+            ),
+            (
+                "xp_screen", "Capture a paired XP desktop to a private host file, with optional "
+                "on-demand analysis by the user's configured vision model.",
+                {
+                    "device": {"type": "string", "description": "Exact paired XP device name; optional if one device"},
+                    "save": {"type": "boolean", "description": "Save private screenshot on Hermes host (default true)"},
+                    "analyze": {"type": "boolean", "description": "Run configured vision model (default false)"},
+                },
+                "📸",
+            ),
+            (
+                "xp_control", "Perform one bounded authenticated XP desktop action. "
+                "Requires host HERMES_CUA_LIVE_ENABLED=1 and confirm_live=true. No arbitrary shell commands.",
+                {
+                    "device": {"type": "string", "description": "Exact paired XP device name; optional if one device"},
+                    "action": {"type": "string", "enum": ["click", "right_click", "double_click",
+                                                             "drag", "scroll", "type_text", "key_press"]},
+                    "coords": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                    "end_coords": {"type": "array", "items": {"type": "integer"}, "minItems": 2, "maxItems": 2},
+                    "delta": {"type": "integer", "minimum": -5, "maximum": 5},
+                    "text": {"type": "string", "maxLength": 128},
+                    "confirm_live": {"type": "boolean", "description": "Explicit confirmation for a live action"},
+                },
+                "🖱️",
+            ),
+            (
+                "xp_service", "Read or manage a named Windows XP service via the authenticated "
+                "Service Control Manager interface. Writes require host opt-in and confirmation.",
+                {
+                    "device": {"type": "string", "description": "Exact paired XP device name; optional if one device"},
+                    "name": {"type": "string", "maxLength": 80, "description": "Windows service name, not a command"},
+                    "action": {"type": "string", "enum": ["status", "start", "stop", "restart"]},
+                    "confirm_live": {"type": "boolean", "description": "Required for start/stop/restart"},
+                },
+                "⚙️",
+            ),
+        )
+        for name, description, properties, emoji in xp_tools:
+            required = ["action"] if name == "xp_control" else ["name"] if name == "xp_service" else []
+            register_tool(
+                name=name, toolset="hermes-msn",
+                schema={
+                    "name": name,
+                    "description": description,
+                    "parameters": {
+                        "type": "object", "properties": properties,
+                        "required": required, "additionalProperties": False,
+                    },
+                },
+                handler=lambda args, operation=name, **_kwargs: _handle_xp_tool(operation, args),
+                check_fn=lambda: True,
+                emoji=emoji,
+            )
     # Run Hermes Talk in the same Hermes CLI plugin context so its provider,
     # OAuth, tool delegation, and model choices stay with the Talk plugin.
     register_cli = getattr(ctx, "register_cli_command", None)
@@ -680,6 +743,53 @@ def _handle_msn_call(args, **_kwargs):
             connection.close()
     except (OSError, ValueError, http.client.HTTPException):
         return json.dumps({"success": False, "error": "Local MSN call controller unavailable"})
+
+
+def _handle_xp_tool(operation, args):
+    """Load isolated XP helpers without shadowing Hermes' own tools package.
+
+    Hermes already imports a top-level tools Python package. Adding the
+    plugin root to sys.path does not fix that package's __path__, so use an
+    isolated package namespace rooted at the plugin instead.
+    """
+    import hashlib
+    import importlib.machinery
+    import importlib.util
+    import sys
+    import types
+    try:
+        source = Path(__file__).resolve().parent
+        root = next(
+            parent for parent in (source, *list(source.parents)[:3])
+            if (parent / "tools/xp_agent_tools.py").is_file()
+        )
+        path = root / "tools/xp_agent_tools.py"
+        name = "_hermesxp_native_" + hashlib.sha256(str(root).encode()).hexdigest()[:12]
+        if name not in sys.modules:
+            package = types.ModuleType(name)
+            package.__path__ = [str(root / "tools")]
+            package.__package__ = name
+            package.__spec__ = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+            sys.modules[name] = package
+        child = name + ".xp_agent_tools"
+        module = sys.modules.get(child)
+        stamp = path.stat().st_mtime_ns
+        if module is None or getattr(module, "_hermesxp_stamp", None) != stamp:
+            spec = importlib.util.spec_from_file_location(child, path)
+            if spec is None or spec.loader is None:
+                raise ImportError("HermesXP native tools cannot be loaded")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[child] = module
+            try:
+                spec.loader.exec_module(module)
+            except Exception:
+                sys.modules.pop(child, None)
+                raise
+            module._hermesxp_stamp = stamp
+        return module.invoke(operation, args)
+    except (ImportError, OSError, ValueError, StopIteration) as exc:
+        log.warning("HermesXP agent tool unavailable: %s", type(exc).__name__)
+        return json.dumps({"success": False, "error": "HermesXP paired-device tools unavailable"})
 
 
 def _talk_bridge():

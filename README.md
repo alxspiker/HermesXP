@@ -580,15 +580,36 @@ Run the installer on the Hermes host as the account that runs Hermes. It is idem
 
 `python3 -m unittest discover -s tests -v` tests the adapter protocol with API stubs. It **does not** assert compatibility with installed Hermes or public MSN.
 
-## Next milestone
+## Native Hermes tools (no XP web dashboard)
 
-Vision integration (#9) completed. **Web dashboard (#4) advanced with initial skeleton.** **Test suite (#5) advanced:** Added GitHub Actions CI workflow (.github/workflows/tests.yml) that runs the full unittest suite (94 tests passing) on every push/PR. README updated with CI details. All host-side tests green; foundation for XP emulation/fixture tests and dashboard API tests in place. No XP machine touched. Burn continuing with interactive dashboard + CI next. All changes pushed to main first.
+HermesXP does **not** host a browser dashboard or a FastAPI management
+server. After installation and pairing, Hermes can use these four native
+plugin tools directly:
 
-### Web Management Dashboard (#4)
+| Tool | Function |
+| --- | --- |
+| `xp_status` | Observe Hermes host service health, installed update revision and paired XP devices; `probe=true` performs read-only authenticated XP checks |
+| `xp_screen` | Capture a paired XP desktop to a private local BMP (overwritten per device); optional `analyze=true` uses a configurable on-demand local or OpenAI-compatible vision model |
+| `xp_control` | Bounded authenticated click, double-click, right-click, drag, scroll, text and key input |
+| `xp_service` | Check a named XP Windows service; optionally start, stop or restart it through Windows SCM |
 
-Run `python3 local-server/api_server.py` from the plugin checkout, then open `http://127.0.0.1:8082`. The server binds to loopback by default and refuses wildcard/public bind addresses. To make the dashboard reachable from another trusted LAN device, set `HERMES_DASHBOARD_BIND_HOST` to the Hermes host's private interface IP and enforce the LAN firewall; never port-forward 8082 to the public Internet. Use an encrypted tunnel when outside that LAN. Do not substitute `python -m http.server`: the dashboard requires the authenticated host API.
+The paired-device registry is private and contains authenticated credentials.
+Neither tool schemas nor outputs disclose pairing tokens. When multiple XP
+devices are paired, select the exact device name. Screenshots are **only
+captured on invocation**; saved screenshots are placed in a user-private
+`~/.hermes/hermesxp-screenshots/` directory (mode 0700, files 0600).
 
-The dashboard reads live user-systemd unit states, checks fixed loopback service ports, displays XP update artifact/checksum and package presence without asserting deployment, and reports registry/API diagnostics. Paired XP probes and screenshots require explicit user clicks/confirmation; the browser never receives pairing tokens or connects directly to XP. Unprobed devices are labeled paired, not online. Screenshot analysis uses a **configurable local or OpenAI-compatible vision backend**, with validated detections distinct from heuristic suggestions; failure reports an empty detection list (see `docs/vision-lfm3vl.md` for paths, model/provider selection, privacy and API options).
+Write operations require **both** `HERMES_CUA_LIVE_ENABLED=1` in the Hermes
+host's plugin environment and `confirm_live=true` in the tool invocation.
+The default is read-only. This does not add a shell command endpoint, change
+pairing, or alter MSN voice authentication. See `docs/remote-cua.md`.
 
-Host-side verification: `PYTHONPATH=local-server python -m unittest discover -s tests -v`. Tests cover status/error handlers, paired-device probe timeouts, token non-disclosure, update metadata, compatibility of the legacy `/api/status` schema, static dashboard wiring, and responsive layout. Fixture tests do not establish live XP behavior; no physical XP was accessed for these changes.
+Vision is optional and loaded only when requested. See
+`docs/vision-lfm3vl.md` for model/provider configuration and image privacy.
+The existing `msn_call` tool and MSN bridge on **127.0.0.1:18769** are
+unrelated to the removed dashboard and remain supported.
+
+Run `PYTHONPATH=local-server python3 -m unittest discover -s tests -q` to
+test the plugin locally without GitHub Actions. Automated tests do not
+substitute for actual Windows XP device verification.
 

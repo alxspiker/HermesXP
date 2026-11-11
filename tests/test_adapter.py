@@ -225,14 +225,31 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
         observed = {}
         class Registry:
             def register_platform(self, **_): pass
-            def register_tool(self, **kwargs): observed.update(kwargs)
+            def register_tool(self, **kwargs): observed[kwargs['name']] = kwargs
         self.m.register(Registry())
-        self.assertEqual(observed["name"], "msn_call")
-        self.assertEqual(observed["toolset"], "hermes-msn")
+        self.assertEqual(set(observed), {"msn_call", "xp_status", "xp_screen",
+                                         "xp_control", "xp_service"})
+        self.assertEqual(observed["msn_call"]["toolset"], "hermes-msn")
         self.assertEqual(
-            observed["schema"]["parameters"]["properties"]["action"]["enum"],
+            observed["msn_call"]["schema"]["parameters"]["properties"]["action"]["enum"],
             ["start", "end", "status"])
-        self.assertTrue(callable(observed["handler"]))
+        for name, config in observed.items():
+            self.assertEqual(config["schema"]["name"], name)
+            self.assertTrue(callable(config["handler"]))
+            self.assertFalse(config["schema"]["parameters"]["additionalProperties"])
+        self.assertIn("confirm_live", observed["xp_control"]["schema"]["parameters"]["properties"])
+        self.assertIn("analyze", observed["xp_screen"]["schema"]["parameters"]["properties"])
+
+    async def test_xp_tools_are_isolated_from_hermes_core_tools_package(self):
+        # Hermes itself owns the top-level tools package. A plugin must
+        # never assume it can import tools.xp_agent_tools from that package.
+        fake_core_tools = types.ModuleType("tools")
+        fake_core_tools.__path__ = [self.tmp.name]
+        with patch.dict(sys.modules, {"tools": fake_core_tools}):
+            result = json.loads(self.m._handle_xp_tool("xp_status", {"probe": False}))
+        self.assertTrue(result["success"], result)
+        self.assertIn("services", result)
+        self.assertNotIn("token", json.dumps(result).lower())
 
     async def test_native_call_tool_uses_loopback_only_and_owner_scoped_secret(self):
         class Reply:

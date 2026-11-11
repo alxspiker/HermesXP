@@ -1,4 +1,1 @@
-fastapi>=0.110,<1
-httpx>=0.24,<1
 Pillow>=10,<13
-pydantic>=2,<3

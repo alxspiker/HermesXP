@@ -5,6 +5,10 @@ version: 0.8.0
 description: "Windows XP companion with native Messenger Call-button rendezvous, authenticated Hermes call controls, LAN recovery and MSN audio."
 provides_tools:
   - msn_call
+  - xp_status
+  - xp_screen
+  - xp_control
+  - xp_service
 requires_env:
   - name: HERMES_MSN_BRIDGE_TOKEN
     description: Long random secret shared only between the Hermes plugin and the local MSN bridge process
@@ -49,8 +53,11 @@ optional_env:
   - name: HERMESXP_ASSET_SOURCE
     description: Host artifact policy (auto, build, or release); auto falls back to a local compile when no matching verified release exists.
     password: false
+  - name: HERMES_CUA_LIVE_ENABLED
+    description: Explicit opt-in to allow XP desktop input and Windows service writes via native Hermes tools. Defaults to disabled.
+    password: false
   - name: HERMESXP_VISION_BACKEND
-    description: Host dashboard screenshot inference backend (llama-cli, openai-compatible, disabled). Configure in dashboard process environment.
+    description: Optional xp_screen vision backend on Hermes host (llama-cli, openai-compatible, disabled).
     password: false
   - name: HERMESXP_VISION_MODEL
     description: Optional GGUF model filename for llama-cli backend (default LFM3-VL). Other models need a matching projector.
@@ -59,7 +66,7 @@ optional_env:
     description: Optional local model/runtime root directory (defaults to ~/local-multimodal on the host).
     password: false
   - name: HERMESXP_VISION_MODEL_PATH
-    description: Optional absolute or model-directory-relative GGUF path used by the host dashboard.
+    description: Optional absolute or model-directory-relative GGUF path for xp_screen analysis.
     password: false
   - name: HERMESXP_VISION_PROJECTOR_PATH
     description: Optional matching multimodal projector path for the chosen GGUF model.

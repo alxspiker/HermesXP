@@ -123,18 +123,33 @@ class XPAgentToolTests(unittest.TestCase):
         self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual((result["width"], result["height"]), (80, 60))
         self.assertNotIn(PAIR["token"], json.dumps(result))
+        self.assertEqual(result["next_tool"], "vision_analyze")
+        self.assertIn("vision_analyze", result["next_tool_hint"])
+        self.assertIn(str(self.home / "cache/vision"), result["screenshot_path"])
         with patch.object(xp, "_client") as client:
             client.return_value.screenshot.return_value = bmp_image(100, 50)
             second = xp.xp_screen({"save": True})
-        self.assertEqual(second["screenshot_path"], result["screenshot_path"])
+        self.assertNotEqual(second["screenshot_path"], result["screenshot_path"])
         self.assertEqual(Path(second["screenshot_path"]).read_bytes(), bmp_image(100, 50))
+        self.assertEqual(Path(result["screenshot_path"]).read_bytes(), bmp_image())
+
+    def test_repeated_captures_are_distinct_and_bounded_for_hermes_vision(self):
+        with patch.object(xp, "_client") as client:
+            client.return_value.screenshot.return_value = bmp_image()
+            paths = [Path(xp.xp_screen({})["screenshot_path"]) for _ in range(10)]
+        self.assertEqual(len(set(paths)), 10)
+        self.assertFalse(paths[0].exists())
+        self.assertFalse(paths[1].exists())
+        self.assertTrue(all(path.exists() for path in paths[2:]))
+        self.assertEqual(len(list(paths[2].parent.glob("*.bmp"))), 8)
 
     def test_screen_without_save_does_not_persist_image(self):
         with patch.object(xp, "_client") as client:
             client.return_value.screenshot.return_value = bmp_image()
             result = xp.xp_screen({"save": False})
         self.assertNotIn("screenshot_path", result)
-        self.assertFalse((self.home / "hermesxp-screenshots").exists())
+        self.assertNotIn("next_tool", result)
+        self.assertFalse((self.home / "cache/vision/hermesxp-screenshots").exists())
 
     def test_screenshot_rejects_malformed_or_oversized_bmp(self):
         for invalid in (b"BMP?", b"" , b"BM" + b"\0" * 52):
@@ -143,33 +158,25 @@ class XPAgentToolTests(unittest.TestCase):
         self.assertEqual(xp._bmp_dimensions(bmp_image()), (80, 60))
 
     def test_screenshot_directory_symlink_is_refused(self):
-        directory = self.home / "hermesxp-screenshots"
+        directory = self.home / "cache/vision/hermesxp-screenshots"
+        directory.parent.mkdir(parents=True)
         directory.symlink_to(self.home)
         with self.assertRaises(RuntimeError):
             xp._save_private_screenshot(bmp_image(), PAIR["name"])
 
-    def test_optional_vision_analyzes_without_web_endpoint(self):
-        with (
-            patch.object(xp, "_client") as client,
-            patch("tools.xp_vision.infer_screenshot", return_value={
-                "status": "verified", "model": "selected", "detections": [],
-            }) as infer,
+    def test_no_custom_vision_calls_or_config_remain(self):
+        root = Path(__file__).resolve().parents[1]
+        for path in (
+            "local-server/vision_model.py", "tools/xp_vision.py",
+            "docs/vision-lfm3vl.md",
         ):
+            self.assertFalse((root / path).exists())
+        self.assertNotIn("HERMESXP_VISION_", (root / "plugin.yaml").read_text())
+        with patch.object(xp, "_client") as client:
             client.return_value.screenshot.return_value = bmp_image()
-            result = xp.xp_screen({"save": False, "analyze": True})
-        self.assertEqual(result["vision"]["model"], "selected")
-        self.assertEqual(infer.call_args.args[0].size, (80, 60))
-        self.assertFalse((self.home / "hermesxp-screenshots").exists())
-
-    def test_optional_vision_failure_never_fabricates_detections(self):
-        with (
-            patch.object(xp, "_client") as client,
-            patch("tools.xp_vision.infer_screenshot", side_effect=RuntimeError("offline")),
-        ):
-            client.return_value.screenshot.return_value = bmp_image()
-            result = xp.xp_screen({"save": False, "analyze": True})
-        self.assertEqual(result["vision"]["status"], "unavailable")
-        self.assertEqual(result["vision"]["detections"], [])
+            result = xp.xp_screen({})
+        self.assertNotIn("vision", result)
+        self.assertIn("screenshot_path", result)
 
     def test_desktop_input_requires_host_opt_in_and_confirmation(self):
         with patch.object(xp, "_client") as client, patch.dict(os.environ, {}, clear=True):

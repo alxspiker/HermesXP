@@ -238,7 +238,8 @@ class TestBridge(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(callable(config["handler"]))
             self.assertFalse(config["schema"]["parameters"]["additionalProperties"])
         self.assertIn("confirm_live", observed["xp_control"]["schema"]["parameters"]["properties"])
-        self.assertIn("analyze", observed["xp_screen"]["schema"]["parameters"]["properties"])
+        self.assertNotIn("analyze", observed["xp_screen"]["schema"]["parameters"]["properties"])
+        self.assertIn("vision_analyze", observed["xp_screen"]["schema"]["description"])
 
     async def test_xp_tools_are_isolated_from_hermes_core_tools_package(self):
         # Hermes itself owns the top-level tools package. A plugin must

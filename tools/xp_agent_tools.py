@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from collections import deque
 import hashlib
-import io
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import socket
 import struct
 import subprocess
@@ -180,14 +180,21 @@ def _bmp_dimensions(content: bytes) -> tuple[int, int]:
 
 
 def _save_private_screenshot(content: bytes, name: str) -> str:
-    root = _home() / "hermesxp-screenshots"
+    # Hermes' built-in vision_analyze can read the media cache even when
+    # terminal execution is sandboxed. A plugin-private folder outside this
+    # cache is not automatically readable from that pipeline.
+    root = _home() / "cache/vision/hermesxp-screenshots"
     if root.is_symlink():
         raise RuntimeError("Screenshot directory cannot be a symlink")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     if root.is_symlink() or not root.is_dir():
         raise RuntimeError("Screenshot directory is not a directory")
     root.chmod(0o700)
-    target = root / (hashlib.sha256(name.encode("utf-8")).hexdigest()[:20] + ".bmp")
+    prefix = hashlib.sha256(name.encode("utf-8")).hexdigest()[:20]
+    # Hermes' vision_analyze tracks image paths for duplicate/cap handling.
+    # Reusing one path for changed pixels prevents legitimate repeated
+    # screenshots from being seen in subsequent agent turns.
+    target = root / f"{prefix}-{time.time_ns()}-{secrets.token_hex(4)}.bmp"
     handle, temp_path = tempfile.mkstemp(prefix=".screenshot-", suffix=".tmp", dir=root)
     try:
         with os.fdopen(handle, "wb") as stream:
@@ -199,14 +206,24 @@ def _save_private_screenshot(content: bytes, name: str) -> str:
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+    # Keep a bounded recent history, including snapshots still needed by
+    # a model using a previous tool result. Never sweep other cache files.
+    try:
+        # The timestamp is embedded in the filename: sorting by it avoids
+        # filesystem mtime resolution/coalescing on rapid successive captures.
+        captures = sorted(root.glob(f"{prefix}-*.bmp"), key=lambda p: p.name)
+        for old in captures[:-8]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass  # a successful capture remains usable if cleanup races another call
     return str(target)
 
 
 def xp_screen(args: dict) -> dict:
-    """Capture only on tool invocation; optionally analyze and/or save locally."""
-    save, analyze = args.get("save", True), args.get("analyze", False)
-    if type(save) is not bool or type(analyze) is not bool:
-        raise ValueError("save and analyze must be booleans")
+    """Capture on demand; Hermes' existing vision tool handles interpretation."""
+    save = args.get("save", True)
+    if type(save) is not bool:
+        raise ValueError("save must be a boolean")
     device = _select_device(args.get("device"))
     content = _client(device).screenshot()
     width, height = _bmp_dimensions(content)
@@ -216,19 +233,14 @@ def xp_screen(args: dict) -> dict:
     }
     if save:
         result["screenshot_path"] = _save_private_screenshot(content, device["name"])
-        result["privacy"] = "Private host file; overwritten on next capture for this device"
-    if analyze:
-        # Optional on-demand vision: no HTTP server, no forced model/provider.
-        # Import lazily so MSN + basic XP tools never require Pillow.
-        try:
-            from PIL import Image
-            from .xp_vision import infer_screenshot
-            with Image.open(io.BytesIO(content)) as image:
-                image.load()
-                result["vision"] = infer_screenshot(image.convert("RGB"))
-        except Exception as exc:
-            result["vision"] = {"status": "unavailable", "reason": type(exc).__name__,
-                                "detections": []}
+        result["privacy"] = "Private Hermes media cache; keeps up to 8 recent captures per device"
+        result["next_tool"] = "vision_analyze"
+        result["next_tool_hint"] = (
+            "Use Hermes' built-in vision_analyze with image_url=screenshot_path "
+            "and question=your current task to view the image using Hermes' "
+            "active vision model or existing fallback. No image analysis "
+            "has run in xp_screen."
+        )
     return result
 
 

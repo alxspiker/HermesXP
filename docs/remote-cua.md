@@ -21,10 +21,14 @@ acting, verifies coordinates, limits mutations to ten requests in five
 seconds and only claims success after the XP companion returns its exact
 expected acknowledgement.
 
-`xp_screen` may save the most recent BMP per paired device, with private
-directory/file permissions and atomic replacement. Set `save=false` to avoid
-persisting the screenshot. `analyze=true` opts into model inference; external
-vision providers receive the screenshot if so configured.
+`xp_screen` saves a bounded recent history (up to eight images per device)
+in Hermes' private media cache, with separate paths to support repeated
+screenshots, secure permissions and atomic file creation. Set `save=false`
+to avoid persisting the screenshot. To inspect its contents, Hermes calls
+its own `vision_analyze` tool with the returned `screenshot_path`.
+The Hermes core selects whether to attach pixels to its vision-capable
+active model or use its configured vision fallback; HermesXP itself runs
+no image model or separate inference process.
 
 The Windows XP listener must remain protected by the LAN firewall and paired
 authentication. Do not expose XP port 18768 to the public Internet. Messenger

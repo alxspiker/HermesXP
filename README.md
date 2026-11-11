@@ -589,23 +589,32 @@ plugin tools directly:
 | Tool | Function |
 | --- | --- |
 | `xp_status` | Observe Hermes host service health, installed update revision and paired XP devices; `probe=true` performs read-only authenticated XP checks |
-| `xp_screen` | Capture a paired XP desktop to a private local BMP (overwritten per device); optional `analyze=true` uses a configurable on-demand local or OpenAI-compatible vision model |
+| `xp_screen` | Capture a paired XP desktop into Hermes' private media cache; Hermes can then view it using its existing `vision_analyze` tool |
 | `xp_control` | Bounded authenticated click, double-click, right-click, drag, scroll, text and key input |
 | `xp_service` | Check a named XP Windows service; optionally start, stop or restart it through Windows SCM |
 
 The paired-device registry is private and contains authenticated credentials.
 Neither tool schemas nor outputs disclose pairing tokens. When multiple XP
 devices are paired, select the exact device name. Screenshots are **only
-captured on invocation**; saved screenshots are placed in a user-private
-`~/.hermes/hermesxp-screenshots/` directory (mode 0700, files 0600).
+captured on invocation**; saved screenshots are placed in the private
+`~/.hermes/cache/vision/hermesxp-screenshots/` media cache (directory mode
+0700, files 0600). Up to eight captures per device are retained, each with
+a distinct path so Hermes can view successive frames.
 
 Write operations require **both** `HERMES_CUA_LIVE_ENABLED=1` in the Hermes
 host's plugin environment and `confirm_live=true` in the tool invocation.
 The default is read-only. This does not add a shell command endpoint, change
 pairing, or alter MSN voice authentication. See `docs/remote-cua.md`.
 
-Vision is optional and loaded only when requested. See
-`docs/vision-lfm3vl.md` for model/provider configuration and image privacy.
+HermesXP does **not** configure, run, or select vision models. After
+`xp_screen` returns `screenshot_path`, call Hermes' existing
+`vision_analyze(image_url=screenshot_path, question=<task>)` to load the
+image into a vision-capable active model, or use Hermes' own auxiliary-vision
+fallback when its active model is text-only. Hermes' built-in tool handles
+BMP-to-supported-format conversion, resizing, and model routing. It may send
+pixels to the configured vision provider, so choose that provider using
+Hermes' ordinary settings. With `save=false`, `xp_screen` captures without
+persisting an image and cannot provide a path for subsequent visual analysis.
 The existing `msn_call` tool and MSN bridge on **127.0.0.1:18769** are
 unrelated to the removed dashboard and remain supported.
 

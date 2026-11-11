@@ -655,12 +655,12 @@ def register(ctx):
                 "🖥️",
             ),
             (
-                "xp_screen", "Capture a paired XP desktop to a private host file, with optional "
-                "on-demand analysis by the user's configured vision model.",
+                "xp_screen", "Capture a paired XP desktop to a private Hermes media-cache file. "
+                "Call the built-in vision_analyze with image_url=screenshot_path "
+                "and your task-specific question to see the screenshot. No separate vision model.",
                 {
                     "device": {"type": "string", "description": "Exact paired XP device name; optional if one device"},
                     "save": {"type": "boolean", "description": "Save private screenshot on Hermes host (default true)"},
-                    "analyze": {"type": "boolean", "description": "Run configured vision model (default false)"},
                 },
                 "📸",
             ),

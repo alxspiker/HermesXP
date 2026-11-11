@@ -74,7 +74,7 @@ class XPUpdateTests(unittest.TestCase):
                 self.end_headers()
                 self.wfile.write(data)
 
-            def log_message(self, fmt, *args):
+            def log_message(self, format, *args):
                 pass
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), FakeXP)
@@ -87,6 +87,93 @@ class XPUpdateTests(unittest.TestCase):
             self.assertEqual(result, "updated")
             self.assertEqual([r[0] for r in requests], ["GET", "POST", "GET"])
             self.assertEqual(requests[1][3], self.image)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+    def test_interrupted_update_stream_is_not_reported_as_success(self):
+        original = hashlib.sha256(b"previous XP image").hexdigest()
+        state = {"digest": original, "partial": False}
+        requests = []
+
+        class InterruptedXP(BaseHTTPRequestHandler):
+            def do_GET(self):
+                requests.append("GET")
+                body = b"sha256=" + state["digest"].encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                requests.append("POST")
+                self.rfile.read(128)
+                state["partial"] = True
+                self.close_connection = True
+                self.connection.close()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), InterruptedXP)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            device = {"name": "interrupted", "host": "127.0.0.1",
+                      "port": server.server_port, "token": TOKEN}
+            with self.assertRaises(client.UpdateError):
+                client.deploy(device, self.image, poll_seconds=1)
+            self.assertEqual(requests, ["GET", "POST"])
+            self.assertTrue(state["partial"])
+            self.assertEqual(state["digest"], original)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(2)
+
+    def test_unhealthy_candidate_that_rolls_back_is_not_reported_as_updated(self):
+        original = hashlib.sha256(b"previous XP image").hexdigest()
+        desired = hashlib.sha256(self.image).hexdigest()
+        state = {"digest": original, "staged": None, "rollback": False}
+
+        class RollbackXP(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b"sha256=" + state["digest"].encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if (body != XPUpdateTests.image or
+                        self.headers.get("X-Hermes-SHA256") != desired):
+                    self.send_error(400)
+                    return
+                state["staged"] = desired
+                state["rollback"] = True
+                response = b"verified; restarting"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(response)))
+                self.end_headers()
+                self.wfile.write(response)
+
+            def log_message(self, format, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RollbackXP)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            device = {"name": "rollback", "host": "127.0.0.1",
+                      "port": server.server_port, "token": TOKEN}
+            with patch.object(client.time, "sleep", lambda _: None):
+                with self.assertRaisesRegex(client.UpdateError, "did not become healthy"):
+                    client.deploy(device, self.image, poll_seconds=0.02)
+            self.assertTrue(state["rollback"])
+            self.assertEqual(state["staged"], desired)
+            self.assertEqual(state["digest"], original)
         finally:
             server.shutdown()
             server.server_close()

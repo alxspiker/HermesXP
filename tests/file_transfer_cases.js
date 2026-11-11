@@ -45,10 +45,10 @@ function handP2P(fields, payload) {
     payload,
   ]);
 }
-function slpInvite(context) {
+function slpInvite(context, sessionId = 42) {
   const body = [
     'EUF-GUID: {5D3E02AB-6190-11D3-BBBB-00C04F795683}',
-    'SessionID: 42',
+    'SessionID: ' + sessionId,
     'AppID: 2',
     'Context: ' + context,
     '',
@@ -169,6 +169,94 @@ function testInbound(root) {
   assert.strictEqual(fs.statSync(path.join(root, 'inbox', done.event.relative)).mode & 0o777, 0o644);
   assert.strictEqual(path.isAbsolute(done.event.relative), false);
   assert.strictEqual(done.event.relative.includes('..'), false);
+}
+
+function testCancelAndFailure() {
+  const root = tmpRoot();
+  const store = new ft.TransferStore({owner: 'owner@example.invalid', root});
+  fs.mkdirSync(path.join(root, 'inbox'), {recursive: true});
+  const invite = Buffer.from(slpInvite(handContext('note.txt', 5)));
+  const request = handP2P({totalSize: invite.length, length: invite.length}, invite);
+  store.receive('owner@example.invalid', request);
+  assert.strictEqual(store.inbound.has(42), true);
+
+  const byeBody = 'SessionID: 42\r\n\r\n';
+  const bye = [
+    'MSNSLP/1.0 BYE',
+    'To: <msnmsgr:bot@example.invalid>',
+    'From: <msnmsgr:owner@example.invalid>',
+    'Call-ID: {22222222-2222-2222-2222-222222222222}',
+    'Content-Type: application/x-msnmsgr-sessionreqbody',
+    'Content-Length: ' + Buffer.byteLength(byeBody),
+    '', byeBody,
+  ].join('\r\n');
+  const cancelled = store.receive('owner@example.invalid', handP2P({
+    totalSize: Buffer.byteLength(bye), length: Buffer.byteLength(bye),
+  }, Buffer.from(bye)));
+  assert.strictEqual(cancelled.dial, false);
+  assert.strictEqual(cancelled.reason, 'cancelled');
+  assert.strictEqual(cancelled.packets.length, 1);
+  assert.ok(ft.parseP2P(cancelled.packets[0]).payload.toString('latin1').includes('MSNSLP/1.0 200 OK'));
+  assert.strictEqual(store.inbound.has(42), false);
+  assert.strictEqual(fs.readdirSync(path.join(root, 'inbox')).length, 0);
+
+  store.receive('owner@example.invalid', request);
+  const gap = handP2P({sessionId: 42, identifier: 14, offset: 1, totalSize: 5, length: 2}, Buffer.from('xx'));
+  const failed = store.receive('owner@example.invalid', gap);
+  assert.strictEqual(failed.reason, 'corrupt chunk');
+  assert.strictEqual(store.inbound.has(42), false);
+
+  fs.mkdirSync(path.join(root, 'outbox'), {recursive: true});
+  fs.writeFileSync(path.join(root, 'outbox', 'send.txt'), 'ok');
+  const outgoing = store.offer('owner@example.invalid', 'send.txt');
+  assert.strictEqual(outgoing.ok, true);
+  const declineBody = 'SessionID: 42\r\n\r\n';
+  const decline = [
+    'MSNSLP/1.0 603 Decline',
+    'To: <msnmsgr:owner@example.invalid>',
+    'From: <msnmsgr:bot@example.invalid>',
+    'Call-ID: ' + outgoing.callId,
+    'Content-Type: application/x-msnmsgr-sessionreqbody',
+    'Content-Length: ' + Buffer.byteLength(declineBody),
+    '', declineBody,
+  ].join('\r\n');
+  const declined = store.receive('owner@example.invalid', handP2P({
+    totalSize: Buffer.byteLength(decline), length: Buffer.byteLength(decline),
+  }, Buffer.from(decline)));
+  assert.strictEqual(declined.reason, 'cancelled');
+  assert.strictEqual(store.outbound.has(outgoing.callId), false);
+}
+
+function testPerTransferLimit(root) {
+  const store = new ft.TransferStore({owner: 'owner@example.invalid', root, maxBytes: 4});
+  const invite = Buffer.from(slpInvite(handContext('note.txt', 5)));
+  const rejected = store.receive('owner@example.invalid', handP2P({
+    totalSize: invite.length, length: invite.length,
+  }, invite));
+  assert.strictEqual(rejected.event, undefined);
+  assert.strictEqual(store.inbound.has(42), false);
+  const out = path.join(root, 'outbox');
+  fs.mkdirSync(out, {recursive: true});
+  fs.writeFileSync(path.join(out, 'large.txt'), '12345');
+  assert.strictEqual(store.offer('owner@example.invalid', 'large.txt').ok, false);
+}
+
+function testActiveTransferLimit() {
+  const root = tmpRoot();
+  const store = new ft.TransferStore({owner: 'owner@example.invalid', root});
+  for (let sessionId = 42; sessionId < 46; sessionId++) {
+    const invite = Buffer.from(slpInvite(handContext('note.txt', 5), sessionId));
+    const result = store.receive('owner@example.invalid', handP2P({
+      totalSize: invite.length, length: invite.length,
+    }, invite));
+    assert.strictEqual(result.reason, undefined);
+  }
+  const invite = Buffer.from(slpInvite(handContext('note.txt', 5), 46));
+  const rejected = store.receive('owner@example.invalid', handP2P({
+    totalSize: invite.length, length: invite.length,
+  }, invite));
+  assert.strictEqual(rejected.reason, 'transfer limit');
+  assert.strictEqual(store.inbound.size, 4);
 }
 
 function testSentinelNotLeaked(root) {
@@ -357,6 +445,9 @@ async function testSwitchboardFramesP2PAndDoesNotDial() {
   const root = tmpRoot();
   fs.mkdirSync(path.join(root, 'inbox'), {recursive: true});
   testInbound(root);
+  testCancelAndFailure();
+  testPerTransferLimit(tmpRoot());
+  testActiveTransferLimit();
   testSentinelNotLeaked(tmpRoot());
   testOutbound(tmpRoot());
   testLegacyDoesNotDial();

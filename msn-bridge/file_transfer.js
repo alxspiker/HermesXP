@@ -7,6 +7,7 @@ const path = require('path');
 
 const FILE_GUID = '{5D3E02AB-6190-11D3-BBBB-00C04F795683}';
 const MAX_FILE_BYTES = 8388608;
+const MAX_ACTIVE_TRANSFERS = 4;
 const ACK_FLAG = 0x02;
 const CHUNK = 1200;
 const CONTEXT_BYTES = 574;
@@ -22,7 +23,7 @@ function sanitizeFilename(name) {
   return name;
 }
 
-function parseContext(b64) {
+function parseContext(b64, maxBytes = MAX_FILE_BYTES) {
   if (typeof b64 !== 'string' || !b64) return null;
   const raw = Buffer.from(b64, 'base64');
   if (raw.length < 22) return null;
@@ -31,7 +32,8 @@ function parseContext(b64) {
   const version = raw.readUInt32LE(4);
   if (version !== 2 && version !== 3) return null;
   const size = Number(raw.readBigUInt64LE(8));
-  if (!Number.isSafeInteger(size) || size < 1 || size > MAX_FILE_BYTES) return null;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FILE_BYTES) return null;
+  if (!Number.isSafeInteger(size) || size < 1 || size > maxBytes) return null;
   let filename = '';
   for (let i = 20; i + 1 < raw.length && filename.length < 81; i += 2) {
     const code = raw.readUInt16LE(i);
@@ -156,7 +158,9 @@ class TransferStore {
     this.root = path.resolve(root);
     this.inbox = path.join(this.root, 'inbox');
     this.outbox = path.join(this.root, 'outbox');
-    this.maxBytes = maxBytes || MAX_FILE_BYTES;
+    this.maxBytes = Number.isSafeInteger(maxBytes) && maxBytes >= 1
+      ? Math.min(maxBytes, MAX_FILE_BYTES)
+      : MAX_FILE_BYTES;
     this.inbound = new Map();
     this.outbound = new Map();
   }
@@ -230,10 +234,13 @@ class TransferStore {
       if (guid !== FILE_GUID || addressed) {
         return {packets: [this._decline(slp)], dial: false, reason: 'refused'};
       }
-      const ctx = parseContext(slp.bodyHeaders.context || '');
+      const ctx = parseContext(slp.bodyHeaders.context || '', this.maxBytes);
       const sessionId = Number(slp.bodyHeaders.sessionid);
       if (!ctx || !Number.isInteger(sessionId) || sessionId <= 0) {
         return {packets: [this._decline(slp)], dial: false, reason: 'rejected file'};
+      }
+      if (this.inbound.has(sessionId) || this.inbound.size >= MAX_ACTIVE_TRANSFERS) {
+        return {packets: [this._decline(slp)], dial: false, reason: 'transfer limit'};
       }
       this.inbound.set(sessionId, {
         size: ctx.size,
@@ -265,8 +272,16 @@ class TransferStore {
       pending.dataIds = ids;
       return {packets, dial: false};
     }
-    if (/^MSNSLP\/1\.0 (603|500)/i.test(slp.start)) {
-      this.outbound.delete(slp.headers['call-id']);
+    if (/^MSNSLP\/1\.0 (603|500|BYE)\b/i.test(slp.start)) {
+      const isBye = /^MSNSLP\/1\.0 BYE\b/i.test(slp.start);
+      const sessionId = Number(slp.bodyHeaders.sessionid);
+      const inboundRemoved = Number.isInteger(sessionId) && this.inbound.delete(sessionId);
+      const outboundRemoved = this.outbound.delete(slp.headers['call-id']);
+      return {
+        packets: isBye && inboundRemoved ? [this._ok(slp, sessionId)] : [],
+        dial: false,
+        reason: inboundRemoved || outboundRemoved ? 'cancelled' : 'no pending transfer',
+      };
     }
     return {packets: [], dial: false};
   }
@@ -275,7 +290,7 @@ class TransferStore {
     const session = this.inbound.get(header.sessionId);
     if (!session) return {packets: [], dial: false, reason: 'no session'};
     const end = header.offset + header.length;
-    if (header.offset !== session.got || end > session.size || header.payload.length !== header.length) {
+    if (header.totalSize !== session.size || header.offset !== session.got || end > session.size || header.payload.length !== header.length) {
       this.inbound.delete(header.sessionId);
       return {packets: [], dial: false, reason: 'corrupt chunk'};
     }
@@ -347,6 +362,7 @@ class TransferStore {
   offer(peer, basename) {
     const fail = reason => ({ok: false, packets: [], dial: false, reason});
     if (!this._owned(peer)) return fail('recipient not authorized');
+    if (this.outbound.size >= MAX_ACTIVE_TRANSFERS) return fail('transfer limit');
     const name = sanitizeFilename(basename);
     if (!name || basename !== name) return fail('basename rejected');
     this._ensure(this.outbox);

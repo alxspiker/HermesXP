@@ -89,16 +89,37 @@ class TestVisionAPI(unittest.TestCase):
             client_class.return_value.screenshot.return_value = b"x" * (32 * 1024 * 1024 + 1)
             self.assertEqual(client.get("/api/screenshot").status_code, 502)
 
+    def test_analyze_endpoint_returns_real_model_detections_separately(self):
+        detections = [{"type": "button", "text": "OK", "bbox": [10, 20, 30, 40],
+                      "confidence": 0.93, "source": "LFM3-VL"}]
+        status = {"state": "verified", "model": "LFM3-VL-2B-QAD-Q4_0.gguf",
+                  "last_success": 123.0, "error": None}
+        with (
+            patch("api_server.fetch_paired_screenshot", return_value=(self.bmp_bytes(), 80, 60)),
+            patch("api_server.infer_lfm3vl", return_value=detections) as infer,
+            patch("api_server.model_status", return_value=status),
+        ):
+            result = TestClient(app).get("/api/analyze?device=XP-A").json()
+        self.assertEqual(result["analysis_mode"], "lfm3-vl")
+        self.assertEqual(result["model"], status["model"])
+        self.assertEqual(result["detections"], detections)
+        self.assertEqual(result["suggestions"][0]["coords"], [62, 45])
+        self.assertEqual(infer.call_args.args[0].size, (80, 60))
+
     def test_analyze_endpoint_reports_heuristics_without_fabricated_detection(self):
-        with patch("api_server.fetch_paired_screenshot", return_value=(self.bmp_bytes(), 80, 60)):
+        with (
+            patch("api_server.fetch_paired_screenshot", return_value=(self.bmp_bytes(), 80, 60)),
+            patch("api_server.infer_lfm3vl", side_effect=RuntimeError("model unavailable")),
+        ):
             result = TestClient(app).get("/api/analyze").json()
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["analysis_mode"], "heuristic")
         self.assertEqual(result["screenshot_size"], "80x60")
         self.assertEqual(result["suggestions"][0]["coords"], [62, 45])
-        self.assertNotIn("detected", result)
-        self.assertIn("unavailable", result["note"].lower())
+        self.assertEqual(result["detections"], [])
+        self.assertEqual(result["model_error"], "RuntimeError")
+        self.assertIn("heuristic", result["note"].lower())
         for suggestion in result["suggestions"]:
             self.assertNotIn("lmf_reason", suggestion)
             self.assertIn("action", suggestion)

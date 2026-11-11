@@ -20,6 +20,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from tools.hermesxp_ui import HermesXPClient, ResponseTooLargeError
 from tools.hermesxp_update import read_registry, UpdateError
+from vision_model import infer_lfm3vl, model_status
 
 app = FastAPI(title="HermesXP Vision Dashboard Server")
 
@@ -48,7 +49,15 @@ async def status():
         service_summary = "active"
     else:
         service_summary = "degraded"
-    return {"services": service_summary, "dashboard": "v0.7", "vision": "heuristic-only", "model": "unavailable", "cua": "simulated-only", "xp_endpoint": "paired-device-authenticated"}
+    vision = model_status()
+    return {
+        "services": service_summary,
+        "dashboard": "v0.7",
+        "vision": "lfm3-vl" if vision["state"] == "verified" else "heuristic-only",
+        "model": vision["model"] or "unavailable",
+        "cua": "simulated-only",
+        "xp_endpoint": "paired-device-authenticated",
+    }
 
 
 SERVICE_SPECS = (
@@ -366,17 +375,34 @@ def generate_heuristic_suggestions(width: int, height: int) -> list:
 
 @app.get("/api/analyze")
 def analyze_screenshot(device: str | None = None):
-    """Analyze a screenshot obtained through the selected paired XP device."""
+    """Analyze a paired-device screenshot with LFM3-VL and separate heuristics."""
     try:
-        _content, width, height = fetch_paired_screenshot(device)
+        content, width, height = fetch_paired_screenshot(device)
         suggestions = generate_heuristic_suggestions(width, height)
+        try:
+            image = Image.open(io.BytesIO(content)).convert("RGB")
+            detections = infer_lfm3vl(image)
+            vision = model_status()
+            analysis_mode = "lfm3-vl"
+            model = vision["model"]
+            model_error = None
+            note = "Controls and bounds are model detections; suggestions are separate heuristic estimates. Verify detections before acting."
+        except Exception as exc:
+            detections = []
+            analysis_mode = "heuristic"
+            model = None
+            model_error = type(exc).__name__
+            note = "LFM3-VL inference failed; only heuristic coordinate estimates are available. No controls were reported as detected."
         analysis = {
             "status": "success",
-            "analysis_mode": "heuristic",
-            "timestamp": datetime.now().isoformat(),
+            "analysis_mode": analysis_mode,
+            "model": model,
+            "model_error": model_error,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "screenshot_size": f"{width}x{height}",
+            "detections": detections,
             "suggestions": suggestions,
-            "note": "Heuristic coordinate estimates only; visual model integration is unavailable. Suggestions are not detected UI elements."
+            "note": note,
         }
         return JSONResponse(analysis)
     except HTTPException as exc:
